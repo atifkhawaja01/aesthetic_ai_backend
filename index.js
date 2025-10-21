@@ -1491,6 +1491,9 @@ app.put('/profile/:id', requireAuth, (req, res) => {
 // ============================================================================
 // 12) Analysis + status routes
 // ============================================================================
+
+app.get('/health', (_req, res) => res.send('OK'));
+
 app.get('/ping', (_req, res) => res.json({ ok: true, backend: 'ready' }));
 
 app.get('/status', (_req, res) => {
