@@ -1,0 +1,180 @@
+{
+  "items": [
+    {
+      "id": "botox",
+      "name": "Botox / Dysport",
+      "description": "Wrinkle reduction (forehead, frown lines, crow\u2019s feet).",
+      "durationMin": 20,
+      "priceMin": 150,
+      "priceMax": 280
+    },
+    {
+      "id": "fillers-cheekbones",
+      "name": "Fillers (Hyaluronic Acid) \u2013 Cheekbones",
+      "description": "Restore volume & contour.",
+      "durationMin": 30,
+      "priceMin": 250,
+      "priceMax": 350
+    },
+    {
+      "id": "fillers-temples",
+      "name": "Fillers \u2013 Temples",
+      "description": "Correct hollow temples.",
+      "durationMin": 20,
+      "priceMin": 200,
+      "priceMax": 300
+    },
+    {
+      "id": "fillers-teartrough",
+      "name": "Fillers \u2013 Under-eye hollows (tear trough)",
+      "description": "Reduce dark circles & tired look.",
+      "durationMin": 20,
+      "priceMin": 280,
+      "priceMax": 350
+    },
+    {
+      "id": "fillers-midface",
+      "name": "Fillers \u2013 Midface / cheeks",
+      "description": "Correct fat loss & sagging.",
+      "durationMin": 25,
+      "priceMin": 250,
+      "priceMax": 400
+    },
+    {
+      "id": "fillers-fine-lines",
+      "name": "Fillers \u2013 Fine lines (smoker\u2019s lines)",
+      "description": "Smooth fine wrinkles.",
+      "durationMin": 15,
+      "priceMin": 180,
+      "priceMax": 250
+    },
+    {
+      "id": "fillers-nasolabial",
+      "name": "Fillers \u2013 Nasolabial folds",
+      "description": "Reduce laugh lines.",
+      "durationMin": 20,
+      "priceMin": 250,
+      "priceMax": 350
+    },
+    {
+      "id": "fillers-lips",
+      "name": "Fillers \u2013 Lips",
+      "description": "Volume, contour, hydration.",
+      "durationMin": 20,
+      "priceMin": 200,
+      "priceMax": 300
+    },
+    {
+      "id": "fillers-chin",
+      "name": "Fillers \u2013 Chin",
+      "description": "Improve projection & shape.",
+      "durationMin": 20,
+      "priceMin": 250,
+      "priceMax": 350
+    },
+    {
+      "id": "fillers-marionette",
+      "name": "Fillers \u2013 Marionette lines",
+      "description": "Lift downturned corners.",
+      "durationMin": 15,
+      "priceMin": 200,
+      "priceMax": 250
+    },
+    {
+      "id": "fillers-jawline",
+      "name": "Fillers \u2013 Jawline",
+      "description": "Define lower face contour.",
+      "durationMin": 25,
+      "priceMin": 300,
+      "priceMax": 400
+    },
+    {
+      "id": "profhilo",
+      "name": "Profhilo / Jalupro / Karisma",
+      "description": "Biostimulating injectable hyaluronic acids.",
+      "durationMin": 20,
+      "priceMin": 220,
+      "priceMax": 300
+    },
+    {
+      "id": "polynucleotides",
+      "name": "Polynucleotides",
+      "description": "Improve elasticity & texture (face & body).",
+      "durationMin": 20,
+      "priceMin": 350,
+      "priceMax": 350
+    },
+    {
+      "id": "exosomes",
+      "name": "Exosomes",
+      "description": "Innovative cellular therapy for scars and marks.",
+      "durationMin": 30,
+      "priceMin": 350,
+      "priceMax": 350
+    },
+    {
+      "id": "prp",
+      "name": "Platelet Rich Plasma (PRP)",
+      "description": "Autologous plasma therapy.",
+      "durationMin": 30,
+      "priceMin": 150,
+      "priceMax": 150
+    },
+    {
+      "id": "mesotherapy",
+      "name": "Mesotherapy (Face & Body)",
+      "description": "Hydration & glow.",
+      "durationMin": 25,
+      "priceMin": 100,
+      "priceMax": 180
+    },
+    {
+      "id": "laser",
+      "name": "Laser Hair Removal (Candela GentleMax Pro)",
+      "description": "Permanent hair reduction.",
+      "durationMin": 60,
+      "priceMin": 30,
+      "priceMax": 120
+    },
+    {
+      "id": "hydrafacial",
+      "name": "HydraFacial & Advanced Facials",
+      "description": "Multistep cleansing & hydration.",
+      "durationMin": 60,
+      "priceMin": 80,
+      "priceMax": 150
+    },
+    {
+      "id": "hifu",
+      "name": "HIFU / RF / Pressotherapy / Carboxytherapy",
+      "description": "Skin tightening & circulation.",
+      "durationMin": 60,
+      "priceMin": 100,
+      "priceMax": 250
+    },
+    {
+      "id": "peelings",
+      "name": "Chemical Peelings",
+      "description": "Renewal & hyperpigmentation.",
+      "durationMin": 30,
+      "priceMin": 80,
+      "priceMax": 150
+    },
+    {
+      "id": "threads",
+      "name": "Threads (PDO / COG Threads)",
+      "description": "Absorbable threads for lifting.",
+      "durationMin": 40,
+      "priceMin": 250,
+      "priceMax": 600
+    },
+    {
+      "id": "doublechin",
+      "name": "Double Chin Lipolysis (LemonBottle / Aqualyx)",
+      "description": "Injectable fat dissolving.",
+      "durationMin": 20,
+      "priceMin": 150,
+      "priceMax": 250
+    }
+  ]
+}
