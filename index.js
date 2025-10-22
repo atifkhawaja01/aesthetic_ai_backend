@@ -231,6 +231,29 @@ function normalizeFaceApi(mod) {
   return null;
 }
 
+// ---- Safe stubs for optional FaceMesh system (module-scope!)
+let MESH_READY = false;
+let MESH_MODEL_NAME = null;
+
+async function loadFaceMeshOnce() {
+  // If you later wire a real mesh loader, set MESH_READY=true and MESH_MODEL_NAME
+  if (!FACE_MESH_ENABLE) {
+    console.log('[mesh] skipped (disabled by FACE_MESH_ENABLE=false)');
+    MESH_READY = false;
+    MESH_MODEL_NAME = null;
+    return;
+  }
+  console.log('[mesh] stub active (no model loaded)');
+  MESH_READY = false;
+  MESH_MODEL_NAME = null;
+}
+
+async function estimateMeshOnCanvas(_canvas) {
+  // Return a benign result so the rest of the pipeline keeps working
+  if (!FACE_MESH_ENABLE) return null;
+  return { count: 0, points: [] };
+}
+
 async function tryImport(spec) {
   try {
     const m = require(spec);
@@ -255,26 +278,6 @@ async function importFaceApi() {
     '@vladmandic/face-api/dist/face-api.js',
     '@vladmandic/face-api/dist/face-api.esm.js',
   ];
-
-// ---- Safe stubs for optional FaceMesh system ----
-let MESH_READY = false;
-let MESH_MODEL_NAME = null;
-
-// Dummy FaceMesh loader — only runs if explicitly enabled in env
-async function loadFaceMeshOnce() {
-  if (!FACE_MESH_ENABLE) return;
-  console.log('[mesh] skipped (disabled by FACE_MESH_ENABLE=false)');
-  MESH_READY = false;
-  MESH_MODEL_NAME = null;
-}
-
-// Dummy mesh estimator for compatibility
-async function estimateMeshOnCanvas(_canvas) {
-  if (!FACE_MESH_ENABLE) return null;
-  return { count: 0, points: [] };
-}
-
-
 
   const tries = [];
   for (const s of specs) {
@@ -1249,7 +1252,9 @@ const aggStd = (arr)=>{
 async function analyzeThree(images) {
   await loadModelsOnce();
   // Try to make FaceMesh available; non-fatal if it fails
-  await loadFaceMeshOnce();
+  if (typeof loadFaceMeshOnce === 'function') {
+    await loadFaceMeshOnce();
+  }
   const faceapi = await getFaceApi();
   
   const rawCanvas = {};
@@ -1260,7 +1265,6 @@ async function analyzeThree(images) {
     rawCanvas[k] = await loadImageAsCanvasFromAny(val);
   }
 
-  
   // Detect on all views (Face-API age/gender/expressions)
   const dets = {};
   for (const k of ['front', 'left', 'right']) dets[k] = await detectOne(faceapi, rawCanvas[k]);
@@ -1277,9 +1281,8 @@ async function analyzeThree(images) {
     if (!d) continue;
     
     const pts = pointsFromLandmarks(d.landmarks);
-    // Log the number of landmarks and the first few points
-    console.log(`Landmarks for ${k}:`, pts.length); // Log the number of landmarks
-    console.log(`First 5 landmarks for ${k}:`, pts.slice(0, 5)); // Log first 5 landmarks
+    console.log(`Landmarks for ${k}:`, pts.length);
+    console.log(`First 5 landmarks for ${k}:`, pts.slice(0, 5));
     
     const { canvas: aligned } = alignToCanonical(rawCanvas[k], pts, 400, 480);
     normalizeIllumination(aligned);
@@ -1320,12 +1323,16 @@ async function analyzeThree(images) {
       sym = symmetryStats(aligned, ptsAligned);
     }
     
-    // ---- NEW: run FaceMesh on aligned canvas, capture 468/478 points (optional)
+    // ---- Optional FaceMesh (safe-guarded)
     let mesh468 = null;
-    if (FACE_MESH_ENABLE && MESH_READY) {
-      const meshRes = await estimateMeshOnCanvas(aligned);
-      if (meshRes && meshRes.points && meshRes.points.length >= 468) {
-        mesh468 = { count: meshRes.count, points: meshRes.points }; // keep all points (468 or 478)
+    if (FACE_MESH_ENABLE && MESH_READY && typeof estimateMeshOnCanvas === 'function') {
+      try {
+        const meshRes = await estimateMeshOnCanvas(aligned);
+        if (meshRes && meshRes.points && meshRes.points.length >= 468) {
+          mesh468 = { count: meshRes.count, points: meshRes.points };
+        }
+      } catch (err) {
+        console.warn('[mesh] estimation failed:', err?.message || err);
       }
     }
     
@@ -1333,7 +1340,6 @@ async function analyzeThree(images) {
       age: ageEst, expr, gender, blurVar, pose, nearFrontal, aligned,
       forehead, glabella, crows, dark, bag, sag, red, tex, pig, perioral, thin, mar, chin, jawSoft, dbl, temple, dull,
       symmetry: sym,
-      // NEW: attach mesh (if available)
       mesh468,
     };
     
@@ -1850,20 +1856,9 @@ function lanIPv4s() {
 (async () => {
   try {
     await loadModelsOnce();
-if (FACE_MESH_ENABLE && typeof loadFaceMeshOnce === 'function') {
-  await loadFaceMeshOnce();
-}
-if (FACE_MESH_ENABLE && typeof estimateMeshOnCanvas === 'function' && globalThis.MESH_READY) {
-  try {
-    const meshRes = await estimateMeshOnCanvas(aligned);
-    if (meshRes?.points?.length >= 468) {
-      mesh468 = { count: meshRes.count, points: meshRes.points };
+    if (FACE_MESH_ENABLE && typeof loadFaceMeshOnce === 'function') {
+      await loadFaceMeshOnce();
     }
-  } catch (err) {
-    console.warn('[mesh] estimation failed:', err.message);
-  }
-}
-
     console.log('Models preloaded at startup.');
   } catch (e) {
     console.error('Model preload failed:', e);
