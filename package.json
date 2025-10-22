@@ -10,12 +10,14 @@
     "build": "echo \"no build\""
   },
   "engines": {
-    "node": ">=18"
+    "node": "20.x"
   },
   "dependencies": {
     "@napi-rs/canvas": "^0.1.52",
     "@tensorflow-models/face-landmarks-detection": "^1.0.6",
+    "@tensorflow/tfjs": "^4.22.0",
     "@tensorflow/tfjs-backend-cpu": "^4.22.0",
+    "@tensorflow/tfjs-converter": "^4.22.0",
     "@tensorflow/tfjs-core": "^4.22.0",
     "@vladmandic/face-api": "^1.7.12",
     "cors": "^2.8.5",
