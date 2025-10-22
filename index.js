@@ -72,7 +72,7 @@ function suppressTfjsSpam(fn) {
 const app = express();
 app.disable('x-powered-by');  
 const allowed = [
-  'https://aiaesthetic.netlify.app/', // 👈 replace with your actual Netlify domain
+  'https://aiaestheticapp.netlify.app', // 👈 replace with your actual Netlify domain
   'http://localhost:5173'          // optional for local testing
 ];
 
