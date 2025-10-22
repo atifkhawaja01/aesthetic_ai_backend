@@ -38,6 +38,26 @@ const crypto = require('crypto');
 const canvasLib = require('@napi-rs/canvas');
 const { createCanvas, Image, ImageData, loadImage } = canvasLib;
 
+// --- Ensure global fetch exists (Node >=18 has it; this is a safety net)
+if (typeof global.fetch !== 'function') {
+  global.fetch = (...args) => import('node-fetch').then(m => m.default(...args));
+}
+
+// --- Boot self-test for @napi-rs/canvas so we fail fast if bindings mismatch
+(function bootCanvasSelfTest() {
+  try {
+    const c = createCanvas(2, 2);
+    const ctx = c.getContext('2d');
+    ctx.fillRect(0, 0, 1, 1);
+    // OK
+  } catch (e) {
+    console.error('[boot] canvas self-test failed:', e);
+    // Hard-exit so Render shows the error immediately instead of hanging on first request
+    process.exit(1);
+  }
+})();
+
+
 // ---- Optional: fast server-side image transcode/resize
 let sharp = null;
 try { sharp = require('sharp'); } catch { /* optional */ }
@@ -189,7 +209,9 @@ let MODEL_SOURCE = 'disk'; // 'disk' | 'url'
 let MODEL_URL_USED = '';
 let LAST_MODEL_ERROR = '';
 
-const DEFAULT_MODELS_URL = (process.env.FACEAPI_MODELS_URL && process.env.FACEAPI_MODELS_URL.trim()) || 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model/';
+const DEFAULT_MODELS_URL =
+  (process.env.FACEAPI_MODELS_URL && process.env.FACEAPI_MODELS_URL.trim()) ||
+  'https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model/';
 const USE_TINY = String(process.env.FACEAPI_USE_TINY ?? 'true').toLowerCase() !== 'false';
 
 const expectedModelFiles = [
@@ -225,14 +247,15 @@ async function tryImport(spec) {
 
 async function importFaceApi() {
   if (FACEAPI_INSTANCE) return FACEAPI_INSTANCE;
-  
+
+  // Strongly prefer the Node build to avoid ESM/browser shims on Render
   const specs = [
     '@vladmandic/face-api/dist/face-api.node.js',
     '@vladmandic/face-api',
     '@vladmandic/face-api/dist/face-api.js',
     '@vladmandic/face-api/dist/face-api.esm.js',
   ];
-  
+
   const tries = [];
   for (const s of specs) {
     const r = await tryImport(s);
@@ -249,39 +272,53 @@ async function importFaceApi() {
       tries.push(`${s} failed: ${r.err}`);
     }
   }
-  
+
   console.error('[face-api] import attempts:\n- ' + tries.join('\n- '));
   throw new Error('FACEAPI_IMPORT_FAILED');
 }
 
 async function getFaceApi() {
   const faceapi = await suppressTfjsSpam(importFaceApi);
+
+  // Force CPU backend (no WebGL on server)
   try { tf.removeBackend('webgl'); } catch {}
   if (tf.getBackend() !== 'cpu') { await tf.setBackend('cpu'); }
-  
+
   if (!FACEAPI_PATCHED) {
+    // Build a proper monkey-patch, including createCanvasElement to prevent undefined size bugs
     const CanvasCtor = createCanvas(1, 1).constructor;
-    global.Canvas = CanvasCtor;
-    global.HTMLCanvasElement = CanvasCtor;
-    global.Image = Image;
-    global.HTMLImageElement = Image;
-    global.ImageData = ImageData;
-    
+
+    // Provide a fetch in env for any URL model fetches
+    const fetchFn = (typeof global.fetch === 'function') ? global.fetch.bind(global) : undefined;
+
     const patch = (faceapi.env?.monkeyPatch || faceapi.monkeyPatch);
     if (typeof patch === 'function') {
-      patch({ Canvas: CanvasCtor, Image, ImageData });
+      patch({
+        Canvas: CanvasCtor,
+        Image,
+        ImageData,
+        // 👇 important: explicit element maker with sane defaults
+        createCanvasElement: (w = 1, h = 1) => createCanvas(w, h),
+        fetch: fetchFn,
+      });
     } else {
+      // Fallback: set fields directly
       faceapi.Canvas = CanvasCtor;
       faceapi.Image = Image;
       faceapi.ImageData = ImageData;
+      faceapi.createCanvasElement = (w = 1, h = 1) => createCanvas(w, h);
+      faceapi.fetch = fetchFn;
       faceapi.env = faceapi.env || {};
-      faceapi.env.Canvas = CanvasCtor;
-      faceapi.env.Image = Image;
-      faceapi.env.ImageData = ImageData;
+      Object.assign(faceapi.env, {
+        Canvas: CanvasCtor,
+        Image,
+        ImageData,
+        createCanvasElement: (w = 1, h = 1) => createCanvas(w, h),
+        fetch: fetchFn,
+      });
     }
     FACEAPI_PATCHED = true;
   }
-  
   return faceapi;
 }
 
@@ -290,7 +327,7 @@ async function loadModelsOnce() {
   if (MODELS_READY) return;
   const faceapi = await getFaceApi();
   const anyExist = expectedModelFiles.some(f => fs.existsSync(path.join(MODELS_DIR, f)));
-  
+
   try {
     const forceUrl = String(process.env.FACEAPI_FORCE_URL || '').toLowerCase() === 'true';
     if (!forceUrl && anyExist && typeof faceapi.nets.ageGenderNet.loadFromDisk === 'function') {
@@ -305,7 +342,6 @@ async function loadModelsOnce() {
         await faceapi.nets.ssdMobilenetv1.loadFromDisk(MODELS_DIR);
         await faceapi.nets.faceLandmark68Net.loadFromDisk(MODELS_DIR);
       }
-      // ensure these are loaded for fallbacks
       await faceapi.nets.ageGenderNet.loadFromDisk(MODELS_DIR);
       await faceapi.nets.faceExpressionNet.loadFromDisk(MODELS_DIR);
       MODEL_SOURCE = 'disk';
@@ -337,77 +373,21 @@ async function loadModelsOnce() {
 }
 
 // ============================================================================
-// 4b) NEW — Optional FaceMesh 468 loader (TFJS runtime, CPU/Node friendly)
-// ============================================================================
-let MESH_READY = false;
-let MESH_MODEL = null;
-let MESH_MODEL_NAME = null;
-
-async function importFaceMeshModel() {
-  // Lazy import; works when @tensorflow-models/face-landmarks-detection is installed
-  const r = await tryImport('@tensorflow-models/face-landmarks-detection');
-  if (!r.mod) throw new Error('FACEMESH_IMPORT_FAILED');
-  // normalize namespace
-  const mod = r.mod.default || r.mod;
-  return mod;
-}
-
-async function loadFaceMeshOnce() {
-  if (!FACE_MESH_ENABLE) return false;
-  if (MESH_READY && MESH_MODEL) return true;
-  
-  try {
-    const fl = await importFaceMeshModel();
-    const { SupportedModels, createDetector } = fl;
-    // Use TFJS runtime; refineLandmarks=true adds iris points (total 478); we can keep them.
-    MESH_MODEL = await createDetector(SupportedModels.MediaPipeFaceMesh, {
-      runtime: 'tfjs',
-      refineLandmarks: true,
-      maxFaces: 1,
-    });
-    MESH_MODEL_NAME = 'MediaPipeFaceMesh/tfjs';
-    MESH_READY = true;
-    console.log('[facemesh] ready:', MESH_MODEL_NAME);
-    return true;
-  } catch (e) {
-    console.warn('[facemesh] disabled (load failed):', e?.message || e);
-    MESH_READY = false;
-    MESH_MODEL = null;
-    return false;
-  }
-}
-
-async function estimateMeshOnCanvas(canvas) {
-  if (!MESH_READY || !MESH_MODEL || !canvas) return null;
-  try {
-    const res = await MESH_MODEL.estimateFaces(canvas, { flipHorizontal: false });
-    if (!Array.isArray(res) || res.length === 0) return null;
-    const face = res[0];
-    // face.keypoints: [{x,y,z,name?}, ...] (478 if refineLandmarks true, else 468)
-    const pts = (face.keypoints || []).map(p => ({ x: p.x, y: p.y, z: Number.isFinite(p.z) ? p.z : 0 }));
-    if (!pts.length) return null;
-    return { points: pts, count: pts.length };
-  } catch (e) {
-    console.warn('[facemesh] estimate failed:', e?.message || e);
-    return null;
-  }
-}
-
-// Optional: triangulation/topology access (safe require)
-let MESH_ANCHORS = null;
-try {
-  MESH_ANCHORS = require(path.join(__dirname, 'backend', 'helpers', 'mesh-anchors.js'));
-  // This is optional and only used downstream for client overlays, if any.
-} catch { /* optional */ }
-
-// ============================================================================
 // 5) Image helpers + preprocessing & metrics
 // ============================================================================
 const MAX_DIM = Number(process.env.ANALYSIS_MAX_DIM || 900);
 const ASSUMED_IPD_MM = 63; // average IPD in mm
 
 async function loadImageAsCanvas(filePath) {
-  const im = await loadImage(filePath);
+  let im;
+  try {
+    im = await loadImage(filePath);
+  } catch (e) {
+    throw new Error('BAD_IMAGE_INPUT');
+  }
+  if (!im || !Number.isFinite(im.width) || !Number.isFinite(im.height) || im.width < 2 || im.height < 2) {
+    throw new Error('BAD_IMAGE_INPUT');
+  }
   const scale = Math.min(1, MAX_DIM / Math.max(im.width, im.height));
   const W = Math.max(1, Math.round(im.width * scale));
   const H = Math.max(1, Math.round(im.height * scale));
@@ -421,10 +401,17 @@ async function loadImageAsCanvas(filePath) {
 // Accepts either a Buffer (preferred) or a file path (string)
 async function loadImageAsCanvasFromAny(input) {
   let im;
-  if (Buffer.isBuffer(input)) {
-    im = await loadImage(input);
-  } else {
-    im = await loadImage(String(input));
+  try {
+    if (Buffer.isBuffer(input)) {
+      im = await loadImage(input);
+    } else {
+      im = await loadImage(String(input));
+    }
+  } catch (e) {
+    throw new Error('BAD_IMAGE_INPUT');
+  }
+  if (!im || !Number.isFinite(im.width) || !Number.isFinite(im.height) || im.width < 2 || im.height < 2) {
+    throw new Error('BAD_IMAGE_INPUT');
   }
   const scale = Math.min(1, MAX_DIM / Math.max(im.width, im.height));
   const W = Math.max(1, Math.round(im.width * scale));
@@ -1599,20 +1586,22 @@ app.post(
 const DISCLAIMER = 'The information provided is for educational purposes only and is not medical advice or a diagnosis. Personal recommendations require in-person assessment by a qualified clinician.';
 
 // ---- /analysis/start (robust: logging + timeout + warmup) ----
+// ==== /analysis/start ========================================================
 app.post(
   '/analysis/start',
   requireAuth,
   (req, res, next) => {
-    // do not let Node kill long requests; we'll enforce our own timeout below
+    // Don't let Node kill the request; we enforce our own timeout below.
     res.setTimeout(0);
     next();
   },
   async (req, res) => {
     const t0 = Date.now();
     const reqId = 'r' + Math.random().toString(36).slice(2, 8);
+    const TIMEOUT_MS = Number(process.env.ANALYSIS_TIMEOUT_MS || 120000);
 
-    // helpers: resolve incoming file refs; keep these local to the route
-    function resolveInput(any) {
+    // --- helpers, local to this route ---
+    const resolveInput = (any) => {
       const s = String(any || '');
       if (s.startsWith('mem:')) {
         const buf = getMem(s);
@@ -1620,23 +1609,21 @@ app.post(
         return buf; // Buffer accepted by loadImage(...)
       }
       return path.join(UPLOAD_DIR, path.basename(s));
-    }
-    function displayFileId(any) {
+    };
+    const displayFileId = (any) => {
       const s = String(any || '');
       return s.startsWith('mem:') ? s : path.basename(s);
-    }
-    function cleanupMem(files) {
+    };
+    const cleanupMem = (files) => {
       for (const k of ['front', 'left', 'right']) {
         const v = String(files?.[k] || '');
         if (v.startsWith('mem:')) delMem(v);
       }
-    }
-
-    // configurable hard cap (default 120s)
-    const TIMEOUT_MS = Number(process.env.ANALYSIS_TIMEOUT_MS || 120000);
+    };
 
     console.log(`[analysis:${reqId}] start`);
 
+    // Parse "files" (stringified JSON or object)
     let files = req.body?.files;
     if (typeof files === 'string') {
       try { files = JSON.parse(files); } catch {}
@@ -1660,10 +1647,10 @@ app.post(
     };
 
     try {
-      // Warm models first so the user call doesn't hang on cold start
+      // Warm models first so this request doesn't hang on cold start
       console.log(`[analysis:${reqId}] warmup…`);
       await loadModelsOnce();
-      await loadFaceMeshOnce(); // will no-op if disabled
+      await loadFaceMeshOnce(); // no-op if FACE_MESH_ENABLE=false
 
       console.log(`[analysis:${reqId}] analyzeThree()…`);
 
@@ -1677,23 +1664,25 @@ app.post(
 
       const { findings, suggestionIds } = await Promise.race([run, timeout]);
 
-      // Build suggestions
+      // --- Build suggestions from IDs ---
       const treatments = loadTreatments().items;
       const suggestionCards = suggestionIds
-        .map(id => {
-          const t = treatments.find(tt => tt.id === id);
-          return t ? {
-            id: t.id,
-            name: t.name,
-            description: t.description,
-            durationMin: t.durationMin,
-            priceMin: t.priceMin,
-            priceMax: t.priceMax,
-          } : null;
+        .map((id) => {
+          const t = treatments.find((tt) => tt.id === id);
+          return t
+            ? {
+                id: t.id,
+                name: t.name,
+                description: t.description,
+                durationMin: t.durationMin,
+                priceMin: t.priceMin,
+                priceMax: t.priceMax,
+              }
+            : null;
         })
         .filter(Boolean);
 
-      // Narrative + top details (unchanged)
+      // Narrative + top details
       const aiReportEnglish = buildEnglishNarrative(findings, suggestionCards, DISCLAIMER);
       const detailsTop = [
         ['Forehead lines', findings.foreheadWrinkleScore],
@@ -1724,7 +1713,9 @@ app.post(
         ? `Age estimate: ~${findings.ageEstimate} (${findings.ageLow}–${findings.ageHigh}).`
         : 'Age estimate: —.';
       const symText = Number.isFinite(findings.symRmsMm) ? `${findings.symRmsMm.toFixed(1)} mm` : '-';
-      const symPctText = Number.isFinite(findings.symPctIPD) ? `(${(findings.symPctIPD * 100).toFixed(1)}% IPD)` : '';
+      const symPctText = Number.isFinite(findings.symPctIPD)
+        ? `(${(findings.symPctIPD * 100).toFixed(1)}% IPD)`
+        : '';
 
       const report = {
         id: 'r' + Date.now(),
@@ -1741,7 +1732,7 @@ app.post(
           glasses: false,
           ageEstimate: findings.ageEstimate,
           ageLow: findings.ageLow,
-          ageHigh: findings.ageHigh,
+          ageHigh: findings.ageHigh
         },
         details: detailsTop,
         suggestions: suggestionCards,
@@ -1753,10 +1744,10 @@ app.post(
           right: displayFileId(files.right),
         },
         raw: findings,
-        perfMs: Date.now() - t0,
+        perfMs: Date.now() - t0
       };
 
-      // Persist & respond
+      // Persist report
       const all = readJSON(ANALYSES_DB, []);
       all.unshift(report);
       writeJSON(ANALYSES_DB, all);
@@ -1769,23 +1760,32 @@ app.post(
         } | mesh ${findings.mesh468Enabled ? 'on' : 'off'}`
       );
 
-      res.json(report);
-    } catch (err) {
-      const msg = String(err?.message || err);
-      console.error(`[analysis:${reqId}] FAILED:`, err?.stack || err);
-      if (msg === 'NO_FACE_DETECTED') return res.status(422).json({ error: 'NO_FACE_DETECTED' });
-      if (msg.startsWith('MISSING_IMAGE_')) return res.status(400).json({ error: msg });
-      if (msg === 'ONLY_IMAGES_ALLOWED') return res.status(415).json({ error: 'ONLY_IMAGES_ALLOWED' });
-      if (msg === 'MISSING_IN_MEMORY_IMAGE') return res.status(400).json({ error: msg });
-      if (msg === 'ANALYSIS_TIMEOUT') return res.status(504).json({ error: 'ANALYSIS_TIMEOUT' });
-      return res.status(500).json({ error: 'ANALYSIS_FAILED', detail: msg });
-    } finally {
-      // ensure any in-memory images are purged
+      // ✅ Clean up in-memory images ONLY on success
       try { cleanupMem(files); } catch {}
-      console.log(`[analysis:${reqId}] done in ${Date.now() - t0} ms`);
-    }
+
+      return res.json(report);
+
+} catch (err) {
+  const msg = String(err?.message || err);
+  console.error(`[analysis:${reqId}] FAILED:`, err?.stack || err);
+
+  // ❌ On error, DO NOT delete mem images — allow retry until TTL expires
+  if (msg === 'NO_FACE_DETECTED') return res.status(422).json({ error: 'NO_FACE_DETECTED' });
+  if (msg.startsWith('MISSING_IMAGE_')) return res.status(400).json({ error: msg });
+  if (msg === 'ONLY_IMAGES_ALLOWED') return res.status(415).json({ error: 'ONLY_IMAGES_ALLOWED' });
+  if (msg === 'BAD_IMAGE_INPUT') return res.status(415).json({ error: 'BAD_IMAGE_INPUT' });
+  if (msg === 'MISSING_IN_MEMORY_IMAGE') return res.status(400).json({ error: msg });
+  if (msg === 'ANALYSIS_TIMEOUT') return res.status(504).json({ error: 'ANALYSIS_TIMEOUT' });
+
+  return res.status(500).json({ error: 'ANALYSIS_FAILED', detail: msg });
+
+} finally {
+  console.log(`[analysis:${reqId}] done in ${Date.now() - t0} ms`);
+}
+
   }
 );
+
 
 
 
