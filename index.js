@@ -256,6 +256,26 @@ async function importFaceApi() {
     '@vladmandic/face-api/dist/face-api.esm.js',
   ];
 
+// ---- Safe stubs for optional FaceMesh system ----
+let MESH_READY = false;
+let MESH_MODEL_NAME = null;
+
+// Dummy FaceMesh loader — only runs if explicitly enabled in env
+async function loadFaceMeshOnce() {
+  if (!FACE_MESH_ENABLE) return;
+  console.log('[mesh] skipped (disabled by FACE_MESH_ENABLE=false)');
+  MESH_READY = false;
+  MESH_MODEL_NAME = null;
+}
+
+// Dummy mesh estimator for compatibility
+async function estimateMeshOnCanvas(_canvas) {
+  if (!FACE_MESH_ENABLE) return null;
+  return { count: 0, points: [] };
+}
+
+
+
   const tries = [];
   for (const s of specs) {
     const r = await tryImport(s);
@@ -1499,9 +1519,8 @@ app.get('/status', (_req, res) => {
     modelSource: MODEL_SOURCE,
     modelUrl: MODEL_URL_USED,
     lastModelError: LAST_MODEL_ERROR,
-    // NEW:
     meshEnabled: FACE_MESH_ENABLE,
-    meshReady: MESH_READY,
+    meshReady: typeof MESH_READY === 'boolean' ? MESH_READY : false,
     meshModel: MESH_MODEL_NAME || null,
   });
 });
@@ -1509,14 +1528,16 @@ app.get('/status', (_req, res) => {
 app.get('/preload', async (_req, res) => {
   try {
     await loadModelsOnce();
-    await loadFaceMeshOnce(); // NEW: prepare mesh too (non-fatal if fails)
+    if (FACE_MESH_ENABLE && typeof loadFaceMeshOnce === 'function') {
+      await loadFaceMeshOnce();
+    }
     return res.json({
       ok: true,
       modelsReady: true,
       modelSource: MODEL_SOURCE,
       modelUrl: MODEL_URL_USED,
       meshEnabled: FACE_MESH_ENABLE,
-      meshReady: MESH_READY,
+      meshReady: typeof MESH_READY === 'boolean' ? MESH_READY : false,
       meshModel: MESH_MODEL_NAME || null,
     });
   } catch (e) {
@@ -1524,6 +1545,7 @@ app.get('/preload', async (_req, res) => {
     return res.status(500).json({ ok: false, error: String(e) });
   }
 });
+
 
 // ==== /uploads (Expo-friendly, no timeouts, clear errors, JPEG normalize) ====
 // ==== /uploads (no disk writes; in-memory storage with TTL) ====
@@ -1650,7 +1672,10 @@ app.post(
       // Warm models first so this request doesn't hang on cold start
       console.log(`[analysis:${reqId}] warmup…`);
       await loadModelsOnce();
-      await loadFaceMeshOnce(); // no-op if FACE_MESH_ENABLE=false
+      if (FACE_MESH_ENABLE && typeof loadFaceMeshOnce === 'function') {
+  await loadFaceMeshOnce();
+}
+// no-op if FACE_MESH_ENABLE=false
 
       console.log(`[analysis:${reqId}] analyzeThree()…`);
 
@@ -1825,7 +1850,20 @@ function lanIPv4s() {
 (async () => {
   try {
     await loadModelsOnce();
-    await loadFaceMeshOnce(); // NEW: attempt mesh preload
+if (FACE_MESH_ENABLE && typeof loadFaceMeshOnce === 'function') {
+  await loadFaceMeshOnce();
+}
+if (FACE_MESH_ENABLE && typeof estimateMeshOnCanvas === 'function' && globalThis.MESH_READY) {
+  try {
+    const meshRes = await estimateMeshOnCanvas(aligned);
+    if (meshRes?.points?.length >= 468) {
+      mesh468 = { count: meshRes.count, points: meshRes.points };
+    }
+  } catch (err) {
+    console.warn('[mesh] estimation failed:', err.message);
+  }
+}
+
     console.log('Models preloaded at startup.');
   } catch (e) {
     console.error('Model preload failed:', e);
