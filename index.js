@@ -35,7 +35,7 @@ const multer = require('multer');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const canvasLib = require('canvas');
+const canvasLib = require('@napi-rs/canvas');
 const { createCanvas, Image, ImageData, loadImage } = canvasLib;
 
 // ---- Optional: fast server-side image transcode/resize
