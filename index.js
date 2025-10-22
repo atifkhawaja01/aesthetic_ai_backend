@@ -70,8 +70,16 @@ function suppressTfjsSpam(fn) {
 // 2) App config
 // ============================================================================
 const app = express();
-app.disable('x-powered-by');
-app.use(cors());
+app.disable('x-powered-by');  
+const allowed = [
+  'https://aiaesthetic.netlify.app/', // 👈 replace with your actual Netlify domain
+  'http://localhost:5173'          // optional for local testing
+];
+
+app.use(cors({
+  origin: allowed,
+  credentials: true
+}));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
