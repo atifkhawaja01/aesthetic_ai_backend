@@ -1598,157 +1598,195 @@ app.post(
 
 const DISCLAIMER = 'The information provided is for educational purposes only and is not medical advice or a diagnosis. Personal recommendations require in-person assessment by a qualified clinician.';
 
-app.post('/analysis/start', requireAuth, (req, res, next) => {
-  res.setTimeout(0);
-  next();
-}, async (req, res) => {
-  const t0 = Date.now();
+// ---- /analysis/start (robust: logging + timeout + warmup) ----
+app.post(
+  '/analysis/start',
+  requireAuth,
+  (req, res, next) => {
+    // do not let Node kill long requests; we'll enforce our own timeout below
+    res.setTimeout(0);
+    next();
+  },
+  async (req, res) => {
+    const t0 = Date.now();
+    const reqId = 'r' + Math.random().toString(36).slice(2, 8);
 
-  // helper: turn request "files" values into Buffers (mem:...) or legacy file paths
-  function resolveInput(any) {
-    const s = String(any || '');
-    if (s.startsWith('mem:')) {
-      const buf = getMem(s);         // <-- from the in-memory store you added
-      if (!buf) throw new Error('MISSING_IN_MEMORY_IMAGE');
-      return buf;                    // Buffer is accepted by loadImage(...)
+    // helpers: resolve incoming file refs; keep these local to the route
+    function resolveInput(any) {
+      const s = String(any || '');
+      if (s.startsWith('mem:')) {
+        const buf = getMem(s);
+        if (!buf) throw new Error('MISSING_IN_MEMORY_IMAGE');
+        return buf; // Buffer accepted by loadImage(...)
+      }
+      return path.join(UPLOAD_DIR, path.basename(s));
     }
-    // Backward-compat: if a plain filename/path was posted, allow it
-    return path.join(UPLOAD_DIR, path.basename(s));
-  }
+    function displayFileId(any) {
+      const s = String(any || '');
+      return s.startsWith('mem:') ? s : path.basename(s);
+    }
+    function cleanupMem(files) {
+      for (const k of ['front', 'left', 'right']) {
+        const v = String(files?.[k] || '');
+        if (v.startsWith('mem:')) delMem(v);
+      }
+    }
 
-  // helper: for report.files — show mem keys as-is; legacy as basename
-  function displayFileId(any) {
-    const s = String(any || '');
-    return s.startsWith('mem:') ? s : path.basename(s);
-  }
+    // configurable hard cap (default 120s)
+    const TIMEOUT_MS = Number(process.env.ANALYSIS_TIMEOUT_MS || 120000);
 
-  try {
+    console.log(`[analysis:${reqId}] start`);
+
     let files = req.body?.files;
     if (typeof files === 'string') {
       try { files = JSON.parse(files); } catch {}
     }
     if (!files?.front || !files?.left || !files?.right) {
+      console.warn(`[analysis:${reqId}] missing images`, files);
       return res.status(400).json({ error: 'MISSING_IMAGES' });
     }
 
-    // Build inputs that can be Buffers (for mem: keys) or paths (legacy)
+    console.log(`[analysis:${reqId}] inputs`, {
+      front: displayFileId(files.front),
+      left:  displayFileId(files.left),
+      right: displayFileId(files.right),
+    });
+
+    // Build inputs (Buffers for mem: keys; absolute paths for legacy)
     const inputs = {
       front: resolveInput(files.front),
       left:  resolveInput(files.left),
       right: resolveInput(files.right),
     };
 
-    // Run analysis (your analyzeThree now loads from Buffer OR path)
-    const { findings, suggestionIds } = await analyzeThree(inputs);
+    try {
+      // Warm models first so the user call doesn't hang on cold start
+      console.log(`[analysis:${reqId}] warmup…`);
+      await loadModelsOnce();
+      await loadFaceMeshOnce(); // will no-op if disabled
 
-    // If inputs came from memory keys, purge them now
-    for (const k of ['front', 'left', 'right']) {
-      const s = String(files[k] || '');
-      if (s.startsWith('mem:')) delMem(s);
+      console.log(`[analysis:${reqId}] analyzeThree()…`);
+
+      // Run with a hard timeout so the client never spins forever
+      const run = (async () => {
+        return await analyzeThree(inputs);
+      })();
+      const timeout = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('ANALYSIS_TIMEOUT')), TIMEOUT_MS)
+      );
+
+      const { findings, suggestionIds } = await Promise.race([run, timeout]);
+
+      // Build suggestions
+      const treatments = loadTreatments().items;
+      const suggestionCards = suggestionIds
+        .map(id => {
+          const t = treatments.find(tt => tt.id === id);
+          return t ? {
+            id: t.id,
+            name: t.name,
+            description: t.description,
+            durationMin: t.durationMin,
+            priceMin: t.priceMin,
+            priceMax: t.priceMax,
+          } : null;
+        })
+        .filter(Boolean);
+
+      // Narrative + top details (unchanged)
+      const aiReportEnglish = buildEnglishNarrative(findings, suggestionCards, DISCLAIMER);
+      const detailsTop = [
+        ['Forehead lines', findings.foreheadWrinkleScore],
+        ['Glabellar (frown) lines', findings.glabellarScore],
+        ['Crow’s feet', findings.crowsFeetScore],
+        ['Under-eye darkness', findings.darkCircleScore],
+        ['Eye-bag puffiness', findings.eyebagScore],
+        ['Temple hollowing', findings.templeHollownessScore],
+        ['Sagging/laxity', findings.saggingScore],
+        ['Nasolabial folds', findings.nasolabialScore],
+        ['Perioral fine lines', findings.perioralFineLinesScore],
+        ['Thin lips', findings.thinLipsScore],
+        ['Marionette lines', findings.marionetteScore],
+        ['Weak chin', findings.weakChinScore],
+        ['Jawline softness', findings.jawlineSoftnessScore],
+        ['Double-chin fullness', findings.doubleChinScore],
+        ['Redness', findings.rednessScore],
+        ['Pigmentation', findings.pigmentationScore],
+        ['Texture/pores/scarring', findings.textureScore],
+        ['Dullness', findings.dullSkinScore],
+      ]
+        .sort((a, b) => b[1] - a[1])
+        .filter(([, v]) => v >= 25)
+        .slice(0, 5)
+        .map(([k]) => k);
+
+      const ageSummary = Number.isFinite(findings.ageEstimate)
+        ? `Age estimate: ~${findings.ageEstimate} (${findings.ageLow}–${findings.ageHigh}).`
+        : 'Age estimate: —.';
+      const symText = Number.isFinite(findings.symRmsMm) ? `${findings.symRmsMm.toFixed(1)} mm` : '-';
+      const symPctText = Number.isFinite(findings.symPctIPD) ? `(${(findings.symPctIPD * 100).toFixed(1)}% IPD)` : '';
+
+      const report = {
+        id: 'r' + Date.now(),
+        userId: req.user.id,
+        createdAt: new Date().toISOString(),
+        summary: `Face asymmetry: ${symText} ${symPctText}, ${findings.symBucket}. ${ageSummary}`,
+        metrics: {
+          emotion: findings.topEmotion || '-',
+          symmetry: findings.symmetry,
+          symmetryMm: findings.symRmsMm,
+          symmetryPctIPD: findings.symPctIPD,
+          symmetryBucket: findings.symBucket,
+          symmetryStdMm: findings.symStdMm,
+          glasses: false,
+          ageEstimate: findings.ageEstimate,
+          ageLow: findings.ageLow,
+          ageHigh: findings.ageHigh,
+        },
+        details: detailsTop,
+        suggestions: suggestionCards,
+        disclaimer: DISCLAIMER,
+        aiReportGreek: aiReportEnglish, // frontend still reads this key
+        files: {
+          front: displayFileId(files.front),
+          left:  displayFileId(files.left),
+          right: displayFileId(files.right),
+        },
+        raw: findings,
+        perfMs: Date.now() - t0,
+      };
+
+      // Persist & respond
+      const all = readJSON(ANALYSES_DB, []);
+      all.unshift(report);
+      writeJSON(ANALYSES_DB, all);
+
+      console.log(
+        `[analysis:${reqId}] ok in ${report.perfMs} ms | user ${req.user.id} | sym ${
+          Number.isFinite(findings.symRmsMm) ? findings.symRmsMm.toFixed(2) + 'mm' : '-'
+        } | age ${
+          Number.isFinite(findings.ageEstimate) ? `${findings.ageEstimate} (${findings.ageLow}-${findings.ageHigh})` : '—'
+        } | mesh ${findings.mesh468Enabled ? 'on' : 'off'}`
+      );
+
+      res.json(report);
+    } catch (err) {
+      const msg = String(err?.message || err);
+      console.error(`[analysis:${reqId}] FAILED:`, err?.stack || err);
+      if (msg === 'NO_FACE_DETECTED') return res.status(422).json({ error: 'NO_FACE_DETECTED' });
+      if (msg.startsWith('MISSING_IMAGE_')) return res.status(400).json({ error: msg });
+      if (msg === 'ONLY_IMAGES_ALLOWED') return res.status(415).json({ error: 'ONLY_IMAGES_ALLOWED' });
+      if (msg === 'MISSING_IN_MEMORY_IMAGE') return res.status(400).json({ error: msg });
+      if (msg === 'ANALYSIS_TIMEOUT') return res.status(504).json({ error: 'ANALYSIS_TIMEOUT' });
+      return res.status(500).json({ error: 'ANALYSIS_FAILED', detail: msg });
+    } finally {
+      // ensure any in-memory images are purged
+      try { cleanupMem(files); } catch {}
+      console.log(`[analysis:${reqId}] done in ${Date.now() - t0} ms`);
     }
-
-    // Build suggestions
-    const treatments = loadTreatments().items;
-    const suggestionCards = suggestionIds.map(id => {
-      const t = treatments.find(tt => tt.id === id);
-      return t ? {
-        id: t.id,
-        name: t.name,
-        description: t.description,
-        durationMin: t.durationMin,
-        priceMin: t.priceMin,
-        priceMax: t.priceMax,
-      } : null;
-    }).filter(Boolean);
-
-    // Narrative
-    const aiReportEnglish = buildEnglishNarrative(findings, suggestionCards, DISCLAIMER);
-
-    // Top details
-    const detailsTop = [
-      ['Forehead lines', findings.foreheadWrinkleScore],
-      ['Glabellar (frown) lines', findings.glabellarScore],
-      ['Crow’s feet', findings.crowsFeetScore],
-      ['Under-eye darkness', findings.darkCircleScore],
-      ['Eye-bag puffiness', findings.eyebagScore],
-      ['Temple hollowing', findings.templeHollownessScore],
-      ['Sagging/laxity', findings.saggingScore],
-      ['Nasolabial folds', findings.nasolabialScore],
-      ['Perioral fine lines', findings.perioralFineLinesScore],
-      ['Thin lips', findings.thinLipsScore],
-      ['Marionette lines', findings.marionetteScore],
-      ['Weak chin', findings.weakChinScore],
-      ['Jawline softness', findings.jawlineSoftnessScore],
-      ['Double-chin fullness', findings.doubleChinScore],
-      ['Redness', findings.rednessScore],
-      ['Pigmentation', findings.pigmentationScore],
-      ['Texture/pores/scarring', findings.textureScore],
-      ['Dullness', findings.dullSkinScore],
-    ].sort((a,b)=>b[1]-a[1]).filter(([,v])=>v>=25).slice(0,5).map(([k])=>k);
-
-    // Summary strings
-    const ageSummary = Number.isFinite(findings.ageEstimate)
-      ? `Age estimate: ~${findings.ageEstimate} (${findings.ageLow}–${findings.ageHigh}).`
-      : 'Age estimate: —.';
-    const symText = Number.isFinite(findings.symRmsMm) ? `${findings.symRmsMm.toFixed(1)} mm` : '-';
-    const symPctText = Number.isFinite(findings.symPctIPD) ? `(${(findings.symPctIPD*100).toFixed(1)}% IPD)` : '';
-
-    // Final report
-    const report = {
-      id: 'r' + Date.now(),
-      userId: req.user.id,
-      createdAt: new Date().toISOString(),
-      summary: `Face asymmetry: ${symText} ${symPctText}, ${findings.symBucket}. ${ageSummary}`,
-      metrics: {
-        emotion: findings.topEmotion || '-',
-        symmetry: findings.symmetry,
-        symmetryMm: findings.symRmsMm,
-        symmetryPctIPD: findings.symPctIPD,
-        symmetryBucket: findings.symBucket,
-        symmetryStdMm: findings.symStdMm,
-        glasses: false,
-        ageEstimate: findings.ageEstimate,
-        ageLow: findings.ageLow,
-        ageHigh: findings.ageHigh,
-      },
-      details: detailsTop,
-      suggestions: suggestionCards,
-      disclaimer: DISCLAIMER,
-      aiReportGreek: aiReportEnglish, // frontend still reads this key
-      files: {
-        // IMPORTANT: show mem keys as-is; legacy filenames as basename
-        front: displayFileId(files.front),
-        left:  displayFileId(files.left),
-        right: displayFileId(files.right),
-      },
-      raw: findings,
-      perfMs: Date.now() - t0,
-    };
-
-    // Persist report
-    const all = readJSON(ANALYSES_DB, []);
-    all.unshift(report);
-    writeJSON(ANALYSES_DB, all);
-
-    console.log(
-      '[analysis] ok in', report.perfMs, 'ms',
-      '| user:', req.user.id,
-      '| sym:', Number.isFinite(findings.symRmsMm) ? findings.symRmsMm.toFixed(2)+'mm' : '-',
-      '| age:', Number.isFinite(findings.ageEstimate) ? `${findings.ageEstimate} (${findings.ageLow}-${findings.ageHigh})` : '—',
-      '| mesh:', findings.mesh468Enabled ? 'on' : 'off'
-    );
-
-    res.json(report);
-  } catch (err) {
-    console.error('analysis/start FAILED:', err?.stack || err);
-    const msg = String(err?.message || err);
-    if (msg === 'NO_FACE_DETECTED') return res.status(422).json({ error: 'NO_FACE_DETECTED' });
-    if (msg.startsWith('MISSING_IMAGE_')) return res.status(400).json({ error: msg });
-    if (msg === 'ONLY_IMAGES_ALLOWED') return res.status(415).json({ error: 'ONLY_IMAGES_ALLOWED' });
-    if (msg === 'MISSING_IN_MEMORY_IMAGE') return res.status(400).json({ error: msg });
-    res.status(500).json({ error: 'ANALYSIS_FAILED', detail: msg });
   }
-});
+);
+
 
 
 // Per-user history & report access
