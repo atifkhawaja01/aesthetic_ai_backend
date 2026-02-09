@@ -90,16 +90,29 @@ function suppressTfjsSpam(fn) {
 // 2) App config
 // ============================================================================
 const app = express();
-app.disable('x-powered-by');  
-const allowed = [
-  'https://aiaestheticapp.netlify.app', // 👈 replace with your actual Netlify domain
-  'http://localhost:5173'          // optional for local testing
+app.disable('x-powered-by');
+
+// CORS: allow Vercel frontend + local dev
+const allowedOrigins = [
+  'https://aesthetic-ai-app-ecru.vercel.app',
+  'http://localhost:5173',
 ];
 
-app.use(cors({
-  origin: allowed,
-  credentials: true
-}));
+const corsOptions = {
+  origin(origin, callback) {
+    // Allow non-browser tools (curl, Postman) with no Origin header
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin)) return callback(null, true);
+    return callback(new Error('Not allowed by CORS'));
+  },
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  // credentials: true, // enable only if you switch to cookie/session auth
+};
+
+// Apply CORS before any routes and handle preflight
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
