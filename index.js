@@ -113,6 +113,44 @@ const corsOptions = {
 // Apply CORS before any routes and handle preflight
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
+
+// ---- Simple route inspector (used by GET /routes)
+function listRoutes(appInstance) {
+  const routes = [];
+  const stack = appInstance?._router?.stack || [];
+
+  for (const layer of stack) {
+    if (layer.route && layer.route.path) {
+      const methods = Object.keys(layer.route.methods || {}).filter(
+        (m) => layer.route.methods[m]
+      );
+      for (const m of methods) {
+        routes.push({ method: m.toUpperCase(), path: layer.route.path });
+      }
+    } else if (layer.name === 'router' && layer.handle?.stack) {
+      const subStack = layer.handle.stack;
+      const basePath =
+        typeof layer.regexp?.source === 'string' &&
+        layer.regexp.source !== '^\\/?$'
+          ? (layer.regexp.source || '')
+          : '';
+      for (const sub of subStack) {
+        if (sub.route && sub.route.path) {
+          const methods = Object.keys(sub.route.methods || {}).filter(
+            (m) => sub.route.methods[m]
+          );
+          for (const m of methods) {
+            routes.push({
+              method: m.toUpperCase(),
+              path: `${basePath}${sub.route.path}`,
+            });
+          }
+        }
+      }
+    }
+  }
+  return routes;
+}
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
@@ -1526,9 +1564,33 @@ app.put('/profile/:id', requireAuth, (req, res) => {
 // 12) Analysis + status routes
 // ============================================================================
 
-app.get('/health', (_req, res) => res.send('OK'));
+// Simple root route so Render "/" is not 404
+app.get('/', (_req, res) => {
+  res.send('Aesthetic AI Backend is running');
+});
+
+// Health route for uptime checks
+app.get('/health', (_req, res) => {
+  res.json({ ok: true });
+});
 
 app.get('/ping', (_req, res) => res.json({ ok: true, backend: 'ready' }));
+
+// Debug route to list registered routes (optionally protected in production)
+app.get('/routes', (req, res) => {
+  if (process.env.NODE_ENV === 'production') {
+    const expectedKey = process.env.DEBUG_KEY;
+    const providedKey = req.headers['x-debug-key'];
+
+    // If no key is configured or the header doesn't match, hide this route
+    if (!expectedKey || providedKey !== expectedKey) {
+      return res.status(404).send('Not found');
+    }
+  }
+
+  const routes = listRoutes(app);
+  res.json({ routes });
+});
 
 app.get('/status', (_req, res) => {
   res.set('Cache-Control', 'no-store');
