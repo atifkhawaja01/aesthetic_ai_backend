@@ -31,4 +31,26 @@ The API listens on **:4000** by default.
 - For production, set `DATA_DIR` (or `USERS_DB_PATH`) to a mounted persistent disk path.
 	- Example: create a Render disk mounted at `/var/data` and set `DATA_DIR=/var/data`.
 - Ensure your Render service is configured with the correct Vercel origin in CORS.
+
+## Persistence (Supabase - Free)
+If you do not want a paid disk, you can store users in Supabase Postgres.
+
+1) Create a `users` table in Supabase (SQL editor):
+```sql
+create table if not exists public.users (
+	id text primary key,
+	email text unique not null,
+	password_hash text not null,
+	name text,
+	phone text,
+	token text,
+	created_at timestamp with time zone default now()
+);
+```
+
+2) Set these env vars on Render (backend only):
+- `SUPABASE_URL`
+- `SUPABASE_SERVICE_ROLE_KEY`
+
+The backend will automatically use Supabase when these are present.
 # aesthetic_ai_backend

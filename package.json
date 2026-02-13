@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@napi-rs/canvas": "^0.1.56",
+    "@supabase/supabase-js": "^2.49.1",
     "@tensorflow-models/face-landmarks-detection": "1.0.6",
     "@tensorflow/tfjs": "4.22.0",
     "@tensorflow/tfjs-backend-cpu": "4.22.0",

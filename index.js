@@ -35,6 +35,7 @@ const multer = require('multer');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { createClient } = require('@supabase/supabase-js');
 const canvasLib = require('@napi-rs/canvas');
 const { createCanvas, Image, ImageData, loadImage } = canvasLib;
 
@@ -168,6 +169,13 @@ const USERS_DB = process.env.USERS_DB_PATH
   : path.join(DATA_DIR, 'users.json');
 const USERS_DIR = path.dirname(USERS_DB);
 const DEBUG_AUTH = String(process.env.DEBUG_AUTH || '').toLowerCase() === 'true';
+const SUPABASE_URL = process.env.SUPABASE_URL || '';
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+const USE_SUPABASE = Boolean(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY);
+const supabase = USE_SUPABASE
+  ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } })
+  : null;
+const USER_STORE = USE_SUPABASE ? 'supabase' : USERS_DB;
 
 // ---- NEW: Feature flag for 468 landmarks
 const FACE_MESH_ENABLE = String(process.env.FACE_MESH_ENABLE ?? 'true').toLowerCase() !== 'false';
@@ -1496,7 +1504,7 @@ async function analyzeThree(images) {
 // 11) Auth & Profile routes + middleware
 // ============================================================================
 function safeUser(u) {
-  const { password, passwordHash, token, ...safe } = u;
+  const { password, passwordHash, password_hash, token, ...safe } = u;
   return safe;
 }
 
@@ -1513,6 +1521,9 @@ function isPasswordMatch(user, password) {
   if (typeof user.passwordHash === 'string') {
     return user.passwordHash === makePasswordHash(raw);
   }
+  if (typeof user.password_hash === 'string') {
+    return user.password_hash === makePasswordHash(raw);
+  }
   if (typeof user.password === 'string') {
     return user.password === raw;
   }
@@ -1524,83 +1535,224 @@ function logAuth(event, payload) {
   console.log(`[auth] ${event}`, payload);
 }
 
-function requireAuth(req, res, next) {
-  const auth = req.headers['authorization'] || '';
-  const m = auth.match(/^Bearer\s+(.+)$/i);
-  if (!m) return res.status(401).json({ error: 'UNAUTHORIZED' });
-  const token = m[1];
-  const users = readJSON(USERS_DB, []);
-  const user = users.find(u => u.token === token);
-  if (!user) return res.status(401).json({ error: 'UNAUTHORIZED' });
-  req.user = user;
-  next();
+async function getUserCount() {
+  if (!USE_SUPABASE) return null;
+  const { count, error } = await supabase
+    .from('users')
+    .select('*', { count: 'exact', head: true });
+  if (error) return null;
+  return typeof count === 'number' ? count : null;
 }
 
-function handleSignup(req, res) {
-  const { email, password } = req.body || {};
-  const normalizedEmail = normalizeEmail(email);
-  if (!normalizedEmail || !password) {
-    return res.status(400).json({ error: 'MISSING_FIELDS', message: 'Please provide both email and password.' });
+async function findUserByEmail(normalizedEmail) {
+  if (USE_SUPABASE) {
+    const { data, error } = await supabase
+      .from('users')
+      .select('*')
+      .eq('email', normalizedEmail)
+      .maybeSingle();
+    if (error) throw error;
+    return data || null;
   }
-
   const users = readJSON(USERS_DB, []);
-  logAuth('register', {
-    usersDb: USERS_DB,
-    emailRaw: String(email || ''),
-    emailNormalized: normalizedEmail,
-    usersBefore: users.length,
-  });
+  return users.find(u => normalizeEmail(u.email) === normalizedEmail) || null;
+}
 
-  if (users.find(u => normalizeEmail(u.email) === normalizedEmail)) {
-    return res.status(409).json({ error: 'EMAIL_EXISTS', message: 'This email is already registered.' });
+async function findUserByToken(token) {
+  if (USE_SUPABASE) {
+    const { data, error } = await supabase
+      .from('users')
+      .select('*')
+      .eq('token', token)
+      .maybeSingle();
+    if (error) throw error;
+    return data || null;
   }
+  const users = readJSON(USERS_DB, []);
+  return users.find(u => u.token === token) || null;
+}
 
-  const user = {
-    id: 'u' + Date.now(),
-    email: normalizedEmail,
-    passwordHash: makePasswordHash(password),
-    name: '',
-    phone: '',
-    token: 't' + crypto.randomBytes(16).toString('hex'),
-  };
+async function findUserById(id) {
+  if (USE_SUPABASE) {
+    const { data, error } = await supabase
+      .from('users')
+      .select('*')
+      .eq('id', id)
+      .maybeSingle();
+    if (error) throw error;
+    return data || null;
+  }
+  const users = readJSON(USERS_DB, []);
+  return users.find(u => u.id === id) || null;
+}
+
+function toStorageUser(user) {
+  if (USE_SUPABASE) {
+    const { passwordHash, ...rest } = user;
+    return { ...rest, password_hash: passwordHash };
+  }
+  return user;
+}
+
+async function insertUser(user) {
+  if (USE_SUPABASE) {
+    const { data, error } = await supabase
+      .from('users')
+      .insert([toStorageUser(user)])
+      .select('*')
+      .single();
+    if (error) throw error;
+    return data;
+  }
+  const users = readJSON(USERS_DB, []);
   users.push(user);
   writeJSON(USERS_DB, users);
-
-  logAuth('register', {
-    usersDb: USERS_DB,
-    emailNormalized: normalizedEmail,
-    usersAfter: users.length,
-  });
-
-  return res.json({ token: user.token, user: safeUser(user) });
+  return user;
 }
 
-function handleLogin(req, res) {
+async function updateUserToken(id, token) {
+  if (USE_SUPABASE) {
+    const { data, error } = await supabase
+      .from('users')
+      .update({ token })
+      .eq('id', id)
+      .select('*')
+      .single();
+    if (error) throw error;
+    return data || null;
+  }
+  const users = readJSON(USERS_DB, []);
+  const idx = users.findIndex(u => u.id === id);
+  if (idx === -1) return null;
+  users[idx].token = token;
+  writeJSON(USERS_DB, users);
+  return users[idx];
+}
+
+async function updateUserProfile(id, updates) {
+  if (USE_SUPABASE) {
+    const { data, error } = await supabase
+      .from('users')
+      .update(updates)
+      .eq('id', id)
+      .select('*')
+      .single();
+    if (error) throw error;
+    return data || null;
+  }
+  const users = readJSON(USERS_DB, []);
+  const idx = users.findIndex(u => u.id === id);
+  if (idx === -1) return null;
+  if (typeof updates.name === 'string') users[idx].name = updates.name;
+  if (typeof updates.phone === 'string') users[idx].phone = updates.phone;
+  writeJSON(USERS_DB, users);
+  return users[idx];
+}
+
+async function requireAuth(req, res, next) {
+  try {
+    const auth = req.headers['authorization'] || '';
+    const m = auth.match(/^Bearer\s+(.+)$/i);
+    if (!m) return res.status(401).json({ error: 'UNAUTHORIZED' });
+    const token = m[1];
+    const user = await findUserByToken(token);
+    if (!user) return res.status(401).json({ error: 'UNAUTHORIZED' });
+    req.user = user;
+    next();
+  } catch (err) {
+    console.error('[auth] storage error:', err?.message || err);
+    return res.status(500).json({ error: 'AUTH_STORAGE_ERROR' });
+  }
+}
+
+async function handleSignup(req, res) {
   const { email, password } = req.body || {};
   const normalizedEmail = normalizeEmail(email);
   if (!normalizedEmail || !password) {
     return res.status(400).json({ error: 'MISSING_FIELDS', message: 'Please provide both email and password.' });
   }
 
-  const users = readJSON(USERS_DB, []);
-  const user = users.find(u => normalizeEmail(u.email) === normalizedEmail);
-  const passwordMatch = user ? isPasswordMatch(user, password) : false;
-
-  logAuth('login', {
-    usersDb: USERS_DB,
-    emailRaw: String(email || ''),
-    emailNormalized: normalizedEmail,
-    userFound: Boolean(user),
-    passwordMatch,
-  });
-
-  if (!user || !passwordMatch) {
-    return res.status(401).json({ error: 'INVALID_CREDENTIALS', message: 'Invalid credentials.' });
+  let usersBefore = null;
+  try {
+    usersBefore = USE_SUPABASE ? await getUserCount() : readJSON(USERS_DB, []).length;
+  } catch {
+    usersBefore = null;
   }
 
-  user.token = 't' + crypto.randomBytes(16).toString('hex');
-  writeJSON(USERS_DB, users);
-  return res.json({ token: user.token, user: safeUser(user) });
+  logAuth('register', {
+    usersDb: USER_STORE,
+    emailRaw: String(email || ''),
+    emailNormalized: normalizedEmail,
+    usersBefore,
+  });
+
+  try {
+    const existingUser = await findUserByEmail(normalizedEmail);
+    if (existingUser) {
+      return res.status(409).json({ error: 'EMAIL_EXISTS', message: 'This email is already registered.' });
+    }
+
+    const user = {
+      id: 'u' + Date.now(),
+      email: normalizedEmail,
+      passwordHash: makePasswordHash(password),
+      name: '',
+      phone: '',
+      token: 't' + crypto.randomBytes(16).toString('hex'),
+    };
+
+    const saved = await insertUser(user);
+    let usersAfter = null;
+    try {
+      usersAfter = USE_SUPABASE ? await getUserCount() : readJSON(USERS_DB, []).length;
+    } catch {
+      usersAfter = null;
+    }
+
+    logAuth('register', {
+      usersDb: USER_STORE,
+      emailNormalized: normalizedEmail,
+      usersAfter,
+    });
+
+    return res.json({ token: saved.token, user: safeUser(saved) });
+  } catch (err) {
+    console.error('[auth] signup storage error:', err?.message || err);
+    return res.status(500).json({ error: 'AUTH_STORAGE_ERROR' });
+  }
+}
+
+async function handleLogin(req, res) {
+  const { email, password } = req.body || {};
+  const normalizedEmail = normalizeEmail(email);
+  if (!normalizedEmail || !password) {
+    return res.status(400).json({ error: 'MISSING_FIELDS', message: 'Please provide both email and password.' });
+  }
+
+  try {
+    const user = await findUserByEmail(normalizedEmail);
+    const passwordMatch = user ? isPasswordMatch(user, password) : false;
+
+    logAuth('login', {
+      usersDb: USER_STORE,
+      emailRaw: String(email || ''),
+      emailNormalized: normalizedEmail,
+      userFound: Boolean(user),
+      passwordMatch,
+    });
+
+    if (!user || !passwordMatch) {
+      return res.status(401).json({ error: 'INVALID_CREDENTIALS', message: 'Invalid credentials.' });
+    }
+
+    const token = 't' + crypto.randomBytes(16).toString('hex');
+    const saved = await updateUserToken(user.id, token);
+    if (!saved) return res.status(404).json({ error: 'NOT_FOUND' });
+    return res.json({ token: saved.token, user: safeUser(saved) });
+  } catch (err) {
+    console.error('[auth] login storage error:', err?.message || err);
+    return res.status(500).json({ error: 'AUTH_STORAGE_ERROR' });
+  }
 }
 
 app.post('/signup', handleSignup);
@@ -1613,16 +1765,25 @@ app.get('/profile/:id', requireAuth, (req, res) => {
   return res.json(safeUser(req.user));
 });
 
-app.put('/profile/:id', requireAuth, (req, res) => {
+app.put('/profile/:id', requireAuth, async (req, res) => {
   if (req.user.id !== req.params.id) return res.status(403).json({ error: 'FORBIDDEN' });
   const { name, phone } = req.body || {};
-  const users = readJSON(USERS_DB, []);
-  const idx = users.findIndex(u => u.id === req.user.id);
-  if (idx === -1) return res.status(404).json({ error: 'NOT_FOUND' });
-  if (typeof name === 'string') users[idx].name = name.trim();
-  if (typeof phone === 'string') users[idx].phone = phone.trim();
-  writeJSON(USERS_DB, users);
-  return res.json(safeUser(users[idx]));
+  const updates = {};
+  if (typeof name === 'string') updates.name = name.trim();
+  if (typeof phone === 'string') updates.phone = phone.trim();
+
+  if (!Object.keys(updates).length) {
+    return res.json(safeUser(req.user));
+  }
+
+  try {
+    const updated = await updateUserProfile(req.user.id, updates);
+    if (!updated) return res.status(404).json({ error: 'NOT_FOUND' });
+    return res.json(safeUser(updated));
+  } catch (err) {
+    console.error('[auth] profile update error:', err?.message || err);
+    return res.status(500).json({ error: 'AUTH_STORAGE_ERROR' });
+  }
 });
 
 // ============================================================================
