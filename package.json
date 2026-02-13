@@ -7,7 +7,8 @@
   "scripts": {
     "start": "node index.js",
     "dev": "nodemon index.js",
-    "build": "echo \"no build\""
+    "build": "echo \"no build\"",
+    "test:auth": "node scripts/auth-smoke-test.js"
   },
   "engines": {
     "node": "20.x"

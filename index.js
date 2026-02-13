@@ -158,15 +158,21 @@ const PORT = process.env.PORT || 4000;
 const ROOT = __dirname;
 const MODELS_DIR = path.join(ROOT, 'models');
 const UPLOAD_DIR = path.join(ROOT, 'uploads');
-const DATA_DIR = path.join(ROOT, 'data');
+const DATA_DIR = process.env.DATA_DIR
+  ? path.resolve(process.env.DATA_DIR)
+  : path.join(ROOT, 'data');
 const ANALYSES_DB = path.join(DATA_DIR, 'analyses.json');
 const TREATMENTS_DB = path.join(DATA_DIR, 'treatments.json');
-const USERS_DB = path.join(DATA_DIR, 'users.json');
+const USERS_DB = process.env.USERS_DB_PATH
+  ? path.resolve(process.env.USERS_DB_PATH)
+  : path.join(DATA_DIR, 'users.json');
+const USERS_DIR = path.dirname(USERS_DB);
+const DEBUG_AUTH = String(process.env.DEBUG_AUTH || '').toLowerCase() === 'true';
 
 // ---- NEW: Feature flag for 468 landmarks
 const FACE_MESH_ENABLE = String(process.env.FACE_MESH_ENABLE ?? 'true').toLowerCase() !== 'false';
 
-for (const d of [UPLOAD_DIR, DATA_DIR, MODELS_DIR]) {
+for (const d of [UPLOAD_DIR, DATA_DIR, MODELS_DIR, USERS_DIR]) {
   if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true });
 }
 if (!fs.existsSync(ANALYSES_DB)) fs.writeFileSync(ANALYSES_DB, '[]');
@@ -1490,8 +1496,32 @@ async function analyzeThree(images) {
 // 11) Auth & Profile routes + middleware
 // ============================================================================
 function safeUser(u) {
-  const { password, token, ...safe } = u;
+  const { password, passwordHash, token, ...safe } = u;
   return safe;
+}
+
+function normalizeEmail(email) {
+  return String(email || '').trim().toLowerCase();
+}
+
+function makePasswordHash(password) {
+  return `demo-${String(password)}`;
+}
+
+function isPasswordMatch(user, password) {
+  const raw = String(password);
+  if (typeof user.passwordHash === 'string') {
+    return user.passwordHash === makePasswordHash(raw);
+  }
+  if (typeof user.password === 'string') {
+    return user.password === raw;
+  }
+  return false;
+}
+
+function logAuth(event, payload) {
+  if (!DEBUG_AUTH) return;
+  console.log(`[auth] ${event}`, payload);
 }
 
 function requireAuth(req, res, next) {
@@ -1506,42 +1536,77 @@ function requireAuth(req, res, next) {
   next();
 }
 
-app.post('/signup', (req, res) => {
+function handleSignup(req, res) {
   const { email, password } = req.body || {};
-  if (!email || !password) return res.status(400).json({ error: 'MISSING_FIELDS', message: 'Please provide both email and password.' });
-  
+  const normalizedEmail = normalizeEmail(email);
+  if (!normalizedEmail || !password) {
+    return res.status(400).json({ error: 'MISSING_FIELDS', message: 'Please provide both email and password.' });
+  }
+
   const users = readJSON(USERS_DB, []);
-  if (users.find(u => u.email.toLowerCase() === String(email).toLowerCase())) {
+  logAuth('register', {
+    usersDb: USERS_DB,
+    emailRaw: String(email || ''),
+    emailNormalized: normalizedEmail,
+    usersBefore: users.length,
+  });
+
+  if (users.find(u => normalizeEmail(u.email) === normalizedEmail)) {
     return res.status(409).json({ error: 'EMAIL_EXISTS', message: 'This email is already registered.' });
   }
-  
+
   const user = {
     id: 'u' + Date.now(),
-    email: String(email).trim(),
-    password: String(password),
+    email: normalizedEmail,
+    passwordHash: makePasswordHash(password),
     name: '',
     phone: '',
     token: 't' + crypto.randomBytes(16).toString('hex'),
   };
   users.push(user);
   writeJSON(USERS_DB, users);
-  return res.json({ token: user.token, user: safeUser(user) });
-});
 
-app.post('/login', (req, res) => {
+  logAuth('register', {
+    usersDb: USERS_DB,
+    emailNormalized: normalizedEmail,
+    usersAfter: users.length,
+  });
+
+  return res.json({ token: user.token, user: safeUser(user) });
+}
+
+function handleLogin(req, res) {
   const { email, password } = req.body || {};
-  if (!email || !password) return res.status(400).json({ error: 'MISSING_FIELDS', message: 'Please provide both email and password.' });
-  
-  const users = readJSON(USERS_DB, []);
-  const user = users.find(u => u.email.toLowerCase() === String(email).toLowerCase());
-  if (!user || user.password !== String(password)) {
-    return res.status(401).json({ error: 'INVALID_CREDENTIALS', message: 'Invalid email or password.' });
+  const normalizedEmail = normalizeEmail(email);
+  if (!normalizedEmail || !password) {
+    return res.status(400).json({ error: 'MISSING_FIELDS', message: 'Please provide both email and password.' });
   }
-  
+
+  const users = readJSON(USERS_DB, []);
+  const user = users.find(u => normalizeEmail(u.email) === normalizedEmail);
+  const passwordMatch = user ? isPasswordMatch(user, password) : false;
+
+  logAuth('login', {
+    usersDb: USERS_DB,
+    emailRaw: String(email || ''),
+    emailNormalized: normalizedEmail,
+    userFound: Boolean(user),
+    passwordMatch,
+  });
+
+  if (!user || !passwordMatch) {
+    return res.status(401).json({ error: 'INVALID_CREDENTIALS', message: 'Invalid credentials.' });
+  }
+
   user.token = 't' + crypto.randomBytes(16).toString('hex');
   writeJSON(USERS_DB, users);
   return res.json({ token: user.token, user: safeUser(user) });
-});
+}
+
+app.post('/signup', handleSignup);
+app.post('/auth/register', handleSignup);
+app.post('/login', handleLogin);
+app.post('/auth/login', handleLogin);
 
 app.get('/profile/:id', requireAuth, (req, res) => {
   if (req.user.id !== req.params.id) return res.status(403).json({ error: 'FORBIDDEN' });
