@@ -1121,6 +1121,34 @@ function severityBucket(v) {
 }
 
 function mapToTreatmentIds(f) {
+  // Check if user actually needs treatment (at least one moderate or severe issue)
+  const TREATMENT_THRESHOLD = 40; // moderate severity minimum
+  const allScores = [
+    f.foreheadWrinkleScore,
+    f.glabellarScore,
+    f.crowsFeetScore,
+    f.darkCircleScore,
+    f.eyebagScore,
+    f.templeHollownessScore,
+    f.saggingScore,
+    f.nasolabialScore,
+    f.perioralFineLinesScore,
+    f.thinLipsScore,
+    f.marionetteScore,
+    f.weakChinScore,
+    f.jawlineSoftnessScore,
+    f.doubleChinScore,
+    f.rednessScore,
+    f.pigmentationScore,
+    f.textureScore,
+    f.dullSkinScore,
+  ];
+  
+  const needsTreatment = allScores.some(score => score >= TREATMENT_THRESHOLD);
+  if (!needsTreatment) {
+    return []; // No treatments needed for healthy skin
+  }
+  
   const featList = [
     ['forehead', f.foreheadWrinkleScore],
     ['glabella', f.glabellarScore],
@@ -1222,7 +1250,7 @@ function mapToTreatmentIds(f) {
   picks.sort((a,b)=>b.w-a.w);
   const unique = [];
   for (const p of picks) if (!unique.find(u => u.id === p.id)) unique.push(p);
-  return unique.slice(0, 3).map(p => p.id);
+  return unique.slice(0, 4).map(p => p.id); // Max 4 treatments
 }
 
 // ============================================================================
