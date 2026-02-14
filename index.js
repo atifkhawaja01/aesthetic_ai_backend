@@ -103,12 +103,21 @@ const corsOptions = {
   origin(origin, callback) {
     // Allow non-browser tools (curl, Postman) with no Origin header
     if (!origin) return callback(null, true);
+    
+    // Allow exact match
     if (allowedOrigins.includes(origin)) return callback(null, true);
+    
+    // Allow any *.vercel.app subdomain for preview deployments
+    if (origin && origin.endsWith('.vercel.app')) return callback(null, true);
+    
+    // Reject others
     return callback(new Error('Not allowed by CORS'));
   },
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
-  // credentials: true, // enable only if you switch to cookie/session auth
+  exposedHeaders: ['Content-Range', 'X-Content-Range'],
+  credentials: true,
+  optionsSuccessStatus: 204,
 };
 
 // Apply CORS before any routes and handle preflight
