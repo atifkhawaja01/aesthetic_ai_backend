@@ -261,6 +261,7 @@ console.log('[storage] users db:', USERS_DB);
 app.use('/uploads', express.static(UPLOAD_DIR));
 
 const memoryJsonCache = new Map();
+const authMemoryUsers = new Map();
 
 const readJSON = (p, fallback) => {
   const resolvedPath = path.resolve(p);
@@ -1715,6 +1716,48 @@ function normalizeEmail(email) {
   return String(email || '').trim().toLowerCase();
 }
 
+function syncAuthMemoryUsers(users) {
+  authMemoryUsers.clear();
+  if (!Array.isArray(users)) return;
+
+  for (const user of users) {
+    if (!user || typeof user !== 'object') continue;
+    const id = String(user.id || '').trim();
+    if (id) authMemoryUsers.set(`id:${id}`, user);
+    const email = normalizeEmail(user.email);
+    if (email) authMemoryUsers.set(`email:${email}`, user);
+  }
+}
+
+function loadAuthUsers() {
+  if (USE_SUPABASE) return null;
+
+  try {
+    const persisted = readJSON(USERS_DB, []);
+    if (Array.isArray(persisted)) {
+      syncAuthMemoryUsers(persisted);
+      return persisted;
+    }
+  } catch {}
+
+  const fallbackUsers = Array.from(authMemoryUsers.values()).filter(Boolean);
+  return fallbackUsers;
+}
+
+function saveAuthUsers(users) {
+  if (USE_SUPABASE) return true;
+
+  try {
+    const normalized = Array.isArray(users) ? users : [];
+    syncAuthMemoryUsers(normalized);
+    writeJSON(USERS_DB, normalized);
+    return true;
+  } catch (err) {
+    console.warn('[auth] falling back to in-memory user store:', err?.message || err);
+    return false;
+  }
+}
+
 function makePasswordHash(password) {
   return `demo-${String(password)}`;
 }
@@ -1757,7 +1800,7 @@ async function findUserByEmail(normalizedEmail) {
     if (error) throw error;
     return data || null;
   }
-  const users = readJSON(USERS_DB, []);
+  const users = loadAuthUsers();
   return users.find(u => normalizeEmail(u.email) === normalizedEmail) || null;
 }
 
@@ -1771,7 +1814,7 @@ async function findUserByToken(token) {
     if (error) throw error;
     return data || null;
   }
-  const users = readJSON(USERS_DB, []);
+  const users = loadAuthUsers();
   return users.find(u => u.token === token) || null;
 }
 
@@ -1785,7 +1828,7 @@ async function findUserById(id) {
     if (error) throw error;
     return data || null;
   }
-  const users = readJSON(USERS_DB, []);
+  const users = loadAuthUsers();
   return users.find(u => u.id === id) || null;
 }
 
@@ -1807,9 +1850,9 @@ async function insertUser(user) {
     if (error) throw error;
     return data;
   }
-  const users = readJSON(USERS_DB, []);
+  const users = loadAuthUsers();
   users.push(user);
-  writeJSON(USERS_DB, users);
+  saveAuthUsers(users);
   return user;
 }
 
@@ -1824,11 +1867,11 @@ async function updateUserToken(id, token) {
     if (error) throw error;
     return data || null;
   }
-  const users = readJSON(USERS_DB, []);
+  const users = loadAuthUsers();
   const idx = users.findIndex(u => u.id === id);
   if (idx === -1) return null;
   users[idx].token = token;
-  writeJSON(USERS_DB, users);
+  saveAuthUsers(users);
   return users[idx];
 }
 
@@ -1843,12 +1886,12 @@ async function updateUserProfile(id, updates) {
     if (error) throw error;
     return data || null;
   }
-  const users = readJSON(USERS_DB, []);
+  const users = loadAuthUsers();
   const idx = users.findIndex(u => u.id === id);
   if (idx === -1) return null;
   if (typeof updates.name === 'string') users[idx].name = updates.name;
   if (typeof updates.phone === 'string') users[idx].phone = updates.phone;
-  writeJSON(USERS_DB, users);
+  saveAuthUsers(users);
   return users[idx];
 }
 
@@ -2427,12 +2470,20 @@ function lanIPv4s() {
   }
 })();
 
-app.listen(PORT, '0.0.0.0', () => {
-  const lans = lanIPv4s();
-  console.log('=== AESTHETIC-AI BACKEND (auth+analysis) ===');
-  console.log('API listening on:');
-  console.log(` • Local: http://localhost:${PORT}`);
-  lans.forEach(ip => console.log(` • LAN: http://${ip}:${PORT}`));
-  console.log(`Models dir: ${MODELS_DIR}`);
-  console.log(`Uploads dir: ${UPLOAD_DIR}`);
-});
+function createServer() {
+  return app.listen(PORT, '0.0.0.0', () => {
+    const lans = lanIPv4s();
+    console.log('=== AESTHETIC-AI BACKEND (auth+analysis) ===');
+    console.log('API listening on:');
+    console.log(` • Local: http://localhost:${PORT}`);
+    lans.forEach(ip => console.log(` • LAN: http://${ip}:${PORT}`));
+    console.log(`Models dir: ${MODELS_DIR}`);
+    console.log(`Uploads dir: ${UPLOAD_DIR}`);
+  });
+}
+
+if (require.main === module) {
+  createServer();
+}
+
+module.exports = { app, createServer };
