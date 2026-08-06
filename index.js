@@ -192,12 +192,30 @@ function resolveWritableDataDir(preferredDir) {
   return TMP_DATA_DIR;
 }
 
+function resolveWritableFilePath(preferredPath, fallbackPath) {
+  const candidates = [];
+  if (preferredPath) candidates.push(path.resolve(preferredPath));
+  if (fallbackPath) candidates.push(path.resolve(fallbackPath));
+
+  for (const filePath of candidates) {
+    try {
+      const dir = path.dirname(filePath);
+      fs.mkdirSync(dir, { recursive: true });
+      const probe = path.join(dir, '.write-test');
+      fs.writeFileSync(probe, 'ok');
+      fs.unlinkSync(probe);
+      return filePath;
+    } catch {}
+  }
+
+  return fallbackPath || preferredPath || path.join(TMP_DATA_DIR, 'fallback.json');
+}
+
 const DATA_DIR = resolveWritableDataDir(DEFAULT_DATA_DIR);
 const ANALYSES_DB = path.join(DATA_DIR, 'analyses.json');
 const TREATMENTS_DB = path.join(DATA_DIR, 'treatments.json');
-const USERS_DB = process.env.USERS_DB_PATH
-  ? path.resolve(process.env.USERS_DB_PATH)
-  : path.join(DATA_DIR, 'users.json');
+const REQUESTED_USERS_DB = process.env.USERS_DB_PATH ? path.resolve(process.env.USERS_DB_PATH) : '';
+const USERS_DB = resolveWritableFilePath(REQUESTED_USERS_DB, path.join(DATA_DIR, 'users.json'));
 const USERS_DIR = path.dirname(USERS_DB);
 const DEBUG_AUTH = String(process.env.DEBUG_AUTH || '').toLowerCase() === 'true';
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
@@ -246,8 +264,22 @@ const readJSON = (p, fallback) => {
   try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return fallback; }
 };
 const writeJSON = (p, obj) => {
-  fs.mkdirSync(path.dirname(p), { recursive: true });
-  fs.writeFileSync(p, JSON.stringify(obj, null, 2));
+  const candidates = [p];
+  const fallbackPath = path.join(DATA_DIR, path.basename(p));
+  if (fallbackPath !== p) candidates.push(fallbackPath);
+
+  let lastErr = null;
+  for (const target of candidates) {
+    try {
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.writeFileSync(target, JSON.stringify(obj, null, 2));
+      return target;
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+
+  throw lastErr || new Error(`Failed to write JSON to ${p}`);
 };
 
 // ---- Simple in-memory store for uploaded image buffers (auto-expires)
