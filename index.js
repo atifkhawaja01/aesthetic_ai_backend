@@ -1886,7 +1886,10 @@ async function requireAuth(req, res, next) {
     next();
   } catch (err) {
     console.error('[auth] storage error:', err?.message || err);
-    return res.status(500).json({ error: 'AUTH_STORAGE_ERROR' });
+    return res.status(500).json({
+      error: 'AUTH_STORAGE_ERROR',
+      message: 'We could not save your session securely. Please try again or sign in once more.'
+    });
   }
 }
 
@@ -1943,7 +1946,10 @@ async function handleSignup(req, res) {
     return res.json({ token: saved.token, user: safeUser(saved) });
   } catch (err) {
     console.error('[auth] signup storage error:', err?.message || err);
-    return res.status(500).json({ error: 'AUTH_STORAGE_ERROR' });
+    return res.status(500).json({
+      error: 'AUTH_STORAGE_ERROR',
+      message: 'We could not save your session securely. Please try again or sign in once more.'
+    });
   }
 }
 
@@ -1976,7 +1982,10 @@ async function handleLogin(req, res) {
     return res.json({ token: saved.token, user: safeUser(saved) });
   } catch (err) {
     console.error('[auth] login storage error:', err?.message || err);
-    return res.status(500).json({ error: 'AUTH_STORAGE_ERROR' });
+    return res.status(500).json({
+      error: 'AUTH_STORAGE_ERROR',
+      message: 'We could not save your session securely. Please try again or sign in once more.'
+    });
   }
 }
 
@@ -2007,7 +2016,10 @@ app.put('/profile/:id', requireAuth, async (req, res) => {
     return res.json(safeUser(updated));
   } catch (err) {
     console.error('[auth] profile update error:', err?.message || err);
-    return res.status(500).json({ error: 'AUTH_STORAGE_ERROR' });
+    return res.status(500).json({
+      error: 'AUTH_STORAGE_ERROR',
+      message: 'We could not save your session securely. Please try again or sign in once more.'
+    });
   }
 });
 
