@@ -1,6 +1,6 @@
 # Lakidis Aesthetic — Backend (Node/Express)
 
-API with **no external integrations** (demo mode). Stores uploads on disk and analysis/history in JSON files.
+API with **no external integrations** (demo mode). Stores users, analyses, and upload state in JSON files and keeps the auth/upload workflow resilient for production use.
 
 ## Quick Start
 ```bash
@@ -17,14 +17,14 @@ The API listens on **:4000** by default.
 - POST `/auth/register` `{ email, password }` (alias)
 - POST `/auth/login` `{ email, password }` (alias)
 - POST `/uploads` form-data with `front`, `left`, `right`
-- POST `/analysis/start` `{ uploadId }` → returns demo analysis object
+- POST `/analysis/start` `{ uploadId }` or `{ files: { front, left, right } }` → returns a report object
 - GET `/history` → list of past demo summaries
 - GET `/treatments` → seeded from `seed/treatments.seed.json`
 - GET `/config` → site url + disclaimer
 
 ## Notes
 - Replace the logic inside `/analysis/start` later to call your real AI pipelines (Azure Face, OpenAI, etc.).
-- Add authentication and database as needed (JWT, Postgres, etc.).
+- For production, set `DATA_DIR` (or `USERS_DB_PATH`) to a mounted persistent disk path so auth and history survive restarts.
 
 ## Persistence (Render)
 - User data is stored in a JSON file. By default it uses `backend/data/users.json`.

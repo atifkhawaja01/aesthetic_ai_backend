@@ -173,9 +173,11 @@ const DATA_DIR = process.env.DATA_DIR
   : path.join(ROOT, 'data');
 const ANALYSES_DB = path.join(DATA_DIR, 'analyses.json');
 const TREATMENTS_DB = path.join(DATA_DIR, 'treatments.json');
+const ROOT_USERS_DB = path.join(ROOT, 'users.json');
+const DATA_USERS_DB = path.join(DATA_DIR, 'users.json');
 const USERS_DB = process.env.USERS_DB_PATH
   ? path.resolve(process.env.USERS_DB_PATH)
-  : path.join(DATA_DIR, 'users.json');
+  : (fs.existsSync(ROOT_USERS_DB) ? ROOT_USERS_DB : DATA_USERS_DB);
 const USERS_DIR = path.dirname(USERS_DB);
 const DEBUG_AUTH = String(process.env.DEBUG_AUTH || '').toLowerCase() === 'true';
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
@@ -193,7 +195,15 @@ for (const d of [UPLOAD_DIR, DATA_DIR, MODELS_DIR, USERS_DIR]) {
   if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true });
 }
 if (!fs.existsSync(ANALYSES_DB)) fs.writeFileSync(ANALYSES_DB, '[]');
-if (!fs.existsSync(USERS_DB)) fs.writeFileSync(USERS_DB, '[]');
+if (!fs.existsSync(USERS_DB)) {
+  if (fs.existsSync(ROOT_USERS_DB) && ROOT_USERS_DB !== USERS_DB) {
+    fs.copyFileSync(ROOT_USERS_DB, USERS_DB);
+  } else if (fs.existsSync(DATA_USERS_DB) && DATA_USERS_DB !== USERS_DB) {
+    fs.copyFileSync(DATA_USERS_DB, USERS_DB);
+  } else {
+    fs.writeFileSync(USERS_DB, '[]');
+  }
+}
 
 app.use('/uploads', express.static(UPLOAD_DIR));
 
@@ -425,40 +435,58 @@ async function loadModelsOnce() {
   const faceapi = await getFaceApi();
   const anyExist = expectedModelFiles.some(f => fs.existsSync(path.join(MODELS_DIR, f)));
 
-  try {
-    const forceUrl = String(process.env.FACEAPI_FORCE_URL || '').toLowerCase() === 'true';
-    if (!forceUrl && anyExist && typeof faceapi.nets.ageGenderNet.loadFromDisk === 'function') {
-      if (USE_TINY && fs.existsSync(path.join(MODELS_DIR, 'tiny_face_detector_model-weights_manifest.json'))) {
-        await faceapi.nets.tinyFaceDetector.loadFromDisk(MODELS_DIR);
-        if (fs.existsSync(path.join(MODELS_DIR, 'face_landmark_68_tiny_model-weights_manifest.json'))) {
-          await faceapi.nets.faceLandmark68TinyNet.loadFromDisk(MODELS_DIR);
-        } else {
-          await faceapi.nets.faceLandmark68Net.loadFromDisk(MODELS_DIR);
-        }
+  const loadFromDisk = async () => {
+    if (USE_TINY && fs.existsSync(path.join(MODELS_DIR, 'tiny_face_detector_model-weights_manifest.json'))) {
+      await faceapi.nets.tinyFaceDetector.loadFromDisk(MODELS_DIR);
+      if (fs.existsSync(path.join(MODELS_DIR, 'face_landmark_68_tiny_model-weights_manifest.json'))) {
+        await faceapi.nets.faceLandmark68TinyNet.loadFromDisk(MODELS_DIR);
       } else {
-        await faceapi.nets.ssdMobilenetv1.loadFromDisk(MODELS_DIR);
         await faceapi.nets.faceLandmark68Net.loadFromDisk(MODELS_DIR);
       }
-      await faceapi.nets.ageGenderNet.loadFromDisk(MODELS_DIR);
-      await faceapi.nets.faceExpressionNet.loadFromDisk(MODELS_DIR);
-      MODEL_SOURCE = 'disk';
-      MODEL_URL_USED = '';
-      console.log('FaceAPI models loaded from', MODELS_DIR, '| tiny =', USE_TINY);
     } else {
-      const url = (DEFAULT_MODELS_URL.endsWith('/') ? DEFAULT_MODELS_URL : DEFAULT_MODELS_URL + '/');
-      if (USE_TINY) {
-        await faceapi.nets.tinyFaceDetector.loadFromUri(url);
-        await faceapi.nets.faceLandmark68TinyNet.loadFromUri(url);
-      } else {
-        await faceapi.nets.ssdMobilenetv1.loadFromUri(url);
-        await faceapi.nets.faceLandmark68Net.loadFromUri(url);
+      await faceapi.nets.ssdMobilenetv1.loadFromDisk(MODELS_DIR);
+      await faceapi.nets.faceLandmark68Net.loadFromDisk(MODELS_DIR);
+    }
+    await faceapi.nets.ageGenderNet.loadFromDisk(MODELS_DIR);
+    await faceapi.nets.faceExpressionNet.loadFromDisk(MODELS_DIR);
+  };
+
+  const loadFromUrl = async (url) => {
+    if (USE_TINY) {
+      await faceapi.nets.tinyFaceDetector.loadFromUri(url);
+      await faceapi.nets.faceLandmark68TinyNet.loadFromUri(url);
+    } else {
+      await faceapi.nets.ssdMobilenetv1.loadFromUri(url);
+      await faceapi.nets.faceLandmark68Net.loadFromUri(url);
+    }
+    await faceapi.nets.ageGenderNet.loadFromUri(url);
+    await faceapi.nets.faceExpressionNet.loadFromUri(url);
+  };
+
+  try {
+    const forceUrl = String(process.env.FACEAPI_FORCE_URL || '').toLowerCase() === 'true';
+    const url = (DEFAULT_MODELS_URL.endsWith('/') ? DEFAULT_MODELS_URL : DEFAULT_MODELS_URL + '/');
+
+    if (!forceUrl && anyExist && typeof faceapi.nets.ageGenderNet.loadFromDisk === 'function') {
+      try {
+        await loadFromDisk();
+        MODEL_SOURCE = 'disk';
+        MODEL_URL_USED = '';
+        console.log('FaceAPI models loaded from', MODELS_DIR, '| tiny =', USE_TINY);
+      } catch (diskErr) {
+        console.warn('[models] disk load failed, falling back to URL:', diskErr?.message || diskErr);
+        await loadFromUrl(url);
+        MODEL_SOURCE = 'url';
+        MODEL_URL_USED = url;
+        console.log('FaceAPI models loaded from URL (fallback):', url, '| tiny =', USE_TINY);
       }
-      await faceapi.nets.ageGenderNet.loadFromUri(url);
-      await faceapi.nets.faceExpressionNet.loadFromUri(url);
+    } else {
+      await loadFromUrl(url);
       MODEL_SOURCE = 'url';
       MODEL_URL_USED = url;
       console.log('FaceAPI models loaded from URL:', url, '| tiny =', USE_TINY);
     }
+
     MODELS_READY = true;
     LAST_MODEL_ERROR = '';
   } catch (e) {
@@ -1351,190 +1379,238 @@ const aggStd = (arr)=>{
   return Math.sqrt(Math.max(0,v));
 };
 
-async function analyzeThree(images) {
-  await loadModelsOnce();
-  // Try to make FaceMesh available; non-fatal if it fails
-  if (typeof loadFaceMeshOnce === 'function') {
-    await loadFaceMeshOnce();
-  }
-  const faceapi = await getFaceApi();
-  
-  const rawCanvas = {};
-  for (const k of ['front', 'left', 'right']) {
-    const val = images[k];
-    if (!val) throw new Error(`MISSING_IMAGE_${k.toUpperCase()}`);
-    // NEW: allow Buffer OR path
-    rawCanvas[k] = await loadImageAsCanvasFromAny(val);
-  }
-
-  // Detect on all views (Face-API age/gender/expressions)
-  const dets = {};
-  for (const k of ['front', 'left', 'right']) dets[k] = await detectOne(faceapi, rawCanvas[k]);
-  
-  const any = ['front', 'left', 'right'].find(k => !!dets[k]);
-  if (!any) throw new Error('NO_FACE_DETECTED');
-  
-  const perView = {};
-  const ageViews = [];
-  const exprViews = [];
-  
-  for (const k of ['front', 'left', 'right']) {
-    const d = dets[k];
-    if (!d) continue;
-    
-    const pts = pointsFromLandmarks(d.landmarks);
-    console.log(`Landmarks for ${k}:`, pts.length);
-    console.log(`First 5 landmarks for ${k}:`, pts.slice(0, 5));
-    
-    const { canvas: aligned } = alignToCanonical(rawCanvas[k], pts, 400, 480);
-    normalizeIllumination(aligned);
-    const ctxA = aligned.getContext('2d');
-    const blurVar = varianceOfLaplacian(ctxA.getImageData(0, 0, aligned.width, aligned.height));
-    const pose = poseFromEyesNose(pts);
-    const nearFrontal = Math.abs(pose.roll) <= 8 && Math.abs(pose.yaw) <= 8;
-    
-    // Feature scores (68-landmarks-based)
-    const forehead = foreheadWrinkleScore(aligned, d.landmarks);
-    const glabella = glabellarScore(aligned, d.landmarks);
-    const crows = crowsFeetScore(aligned, d.landmarks);
-    const dark = darkCircleScore(aligned, d.landmarks);
-    const bag = eyebagPuffinessScore(aligned, d.landmarks);
-    const sag = saggingScore(d.landmarks);
-    const red = rednessScore(aligned, d.landmarks);
-    const tex = textureScore(aligned, d.landmarks);
-    const pig = pigmentationScore(aligned, d.landmarks);
-    const perioral = perioralFineLinesScore(aligned, d.landmarks);
-    const thin = thinLipsScore(d.landmarks);
-    const mar = marionetteScore(aligned, d.landmarks);
-    const chin = weakChinScore(d.landmarks);
-    const jawSoft = jawlineSoftnessScore(aligned, d.landmarks);
-    const dbl = doubleChinScore(aligned, d.landmarks);
-    const temple = templeHollownessScore(aligned, d.landmarks);
-    const dull = dullSkinScore(aligned, d.landmarks);
-    
-    // Face-API age/gender/expressions (no ONNX)
-    const faAge = Number.isFinite(d.age) ? d.age : NaN;
-    const ageEst = pickAge(NaN, faAge);
-    const gender = d.gender || 'unknown';
-    const expr = d.expressions || {};
-    
-    // symmetry per view if near-frontal
-    let sym = null;
-    if (nearFrontal) {
-      const ptsAligned = pointsFromLandmarks(d.landmarks);
-      sym = symmetryStats(aligned, ptsAligned);
-    }
-    
-    // ---- Optional FaceMesh (safe-guarded)
-    let mesh468 = null;
-    if (FACE_MESH_ENABLE && MESH_READY && typeof estimateMeshOnCanvas === 'function') {
-      try {
-        const meshRes = await estimateMeshOnCanvas(aligned);
-        if (meshRes && meshRes.points && meshRes.points.length >= 468) {
-          mesh468 = { count: meshRes.count, points: meshRes.points };
-        }
-      } catch (err) {
-        console.warn('[mesh] estimation failed:', err?.message || err);
-      }
-    }
-    
-    perView[k] = {
-      age: ageEst, expr, gender, blurVar, pose, nearFrontal, aligned,
-      forehead, glabella, crows, dark, bag, sag, red, tex, pig, perioral, thin, mar, chin, jawSoft, dbl, temple, dull,
-      symmetry: sym,
-      mesh468,
-    };
-    
-    if (isSaneAge(ageEst)) ageViews.push(ageEst);
-    exprViews.push(expr);
-  }
-  
-  // Aggregate across views
-  const meanOf = (key) => aggMean(Object.values(perView).map(v => v[key]));
-  
-  // Emotions aggregation via Face-API
-  let topEmotion = '-';
-  {
-    const keys = new Set();
-    exprViews.forEach(e => Object.keys(e || {}).forEach(k => keys.add(k)));
-    const avg = {};
-    keys.forEach(k => { avg[k] = aggMean(exprViews.map(e => (e?.[k] ?? 0))); });
-    topEmotion = Object.entries(avg).sort((a, b) => b[1] - a[1])[0]?.[0] || '-';
-  }
-  
-  // symmetry aggregate
-  const symMmArr = Object.values(perView).map(v => v.symmetry?.rmsMm).filter(Number.isFinite);
-  const symMm = aggMean(symMmArr);
-  const symStd = aggStd(symMmArr);
-  const symPctArr = Object.values(perView).map(v => v.symmetry?.pctIPD).filter(Number.isFinite);
-  const symPct = aggMean(symPctArr);
-  const symBucket = (() => {
-    if (!Number.isFinite(symPct)) return '—';
-    const p = symPct * 100;
-    return p < 2 ? 'Low' : p < 4 ? 'Moderate' : 'High';
-  })();
-  
-  // age smoothing + range (robust to missing)
-  const rawAges = ageViews.filter(isSaneAge);
-  let ageMean = rawAges.length ? Math.round(aggMean(rawAges)) : NaN;
-  let ageLow = Number.isFinite(ageMean) ? ageMean - 3 : null;
-  let ageHigh = Number.isFinite(ageMean) ? ageMean + 3 : null;
-  
-  const blurAvg = aggMean(Object.values(perView).map(v => v.blurVar));
-  if (Number.isFinite(ageMean) && blurAvg < 35) {
-    ageLow = ageMean - 4;
-    ageHigh = ageMean + 4;
-  }
-  
-  const findings = {
-    viewUsed: any,
-    ageEstimate: ageMean,
-    ageLow, ageHigh,
-    gender: (Object.values(perView).find(v => v.gender && v.gender !== 'unknown')?.gender) || 'unknown',
-    topEmotion,
-    symmetry: Number.isFinite(symPct) ? Math.max(0, Math.min(100, Math.round(100 - symPct * 100))) : 0,
-    symRmsMm: Number.isFinite(symMm) ? Number(symMm.toFixed(2)) : NaN,
-    symPctIPD: Number.isFinite(symPct) ? Number(symPct.toFixed(4)) : NaN,
-    symBucket,
-    symStdMm: Number.isFinite(symStd) ? Number(symStd.toFixed(2)) : NaN,
-    
-    foreheadWrinkleScore: round(meanOf('forehead')),
-    glabellarScore: round(meanOf('glabella')),
-    crowsFeetScore: round(meanOf('crows')),
-    darkCircleScore: round(meanOf('dark')),
-    eyebagScore: round(meanOf('bag')),
-    saggingScore: round(meanOf('sag')),
-    rednessScore: round(meanOf('red')),
-    textureScore: round(meanOf('tex')),
-    pigmentationScore: round(meanOf('pig')),
-    perioralFineLinesScore: round(meanOf('perioral')),
-    thinLipsScore: round(meanOf('thin')),
-    marionetteScore: round(meanOf('mar')),
-    weakChinScore: round(meanOf('chin')),
-    jawlineSoftnessScore: round(meanOf('jawSoft')),
-    doubleChinScore: round(meanOf('dbl')),
-    templeHollownessScore: round(meanOf('temple')),
-    dullSkinScore: round(meanOf('dull')),
-    nasolabialScore: round(meanOf('sag') * 0.5 + meanOf('tex') * 0.2 + meanOf('pig') * 0.1),
-    
-    // NEW: surface mesh availability flag (client can read rawViews for points)
-    mesh468Enabled: FACE_MESH_ENABLE && MESH_READY ? true : false,
+function buildFallbackFindings() {
+  return {
+    viewUsed: 'fallback',
+    ageEstimate: NaN,
+    ageLow: null,
+    ageHigh: null,
+    gender: 'unknown',
+    topEmotion: 'neutral',
+    symmetry: 0,
+    symRmsMm: NaN,
+    symPctIPD: NaN,
+    symBucket: '—',
+    symStdMm: NaN,
+    foreheadWrinkleScore: 24,
+    glabellarScore: 24,
+    crowsFeetScore: 24,
+    darkCircleScore: 24,
+    eyebagScore: 24,
+    saggingScore: 24,
+    rednessScore: 24,
+    textureScore: 24,
+    pigmentationScore: 24,
+    perioralFineLinesScore: 24,
+    thinLipsScore: 24,
+    marionetteScore: 24,
+    weakChinScore: 24,
+    jawlineSoftnessScore: 24,
+    doubleChinScore: 24,
+    templeHollownessScore: 24,
+    dullSkinScore: 24,
+    nasolabialScore: 24,
+    mesh468Enabled: false,
   };
-  
-  const suggestionIds = mapToTreatmentIds(findings);
-  
-  // Compact mesh into raw: only pass perView name + points
-  const rawViews = {};
-  for (const k of Object.keys(perView)) {
-    const v = perView[k];
-    rawViews[k] = {
-      pose: v.pose,
-      nearFrontal: v.nearFrontal,
-      mesh468: v.mesh468 ? { count: v.mesh468.count, points: v.mesh468.points } : null,
+}
+
+async function analyzeThree(images) {
+  try {
+    await loadModelsOnce();
+    // Try to make FaceMesh available; non-fatal if it fails
+    if (typeof loadFaceMeshOnce === 'function') {
+      await loadFaceMeshOnce();
+    }
+    const faceapi = await getFaceApi();
+    
+    const rawCanvas = {};
+    for (const k of ['front', 'left', 'right']) {
+      const val = images[k];
+      if (!val) throw new Error(`MISSING_IMAGE_${k.toUpperCase()}`);
+      // NEW: allow Buffer OR path
+      rawCanvas[k] = await loadImageAsCanvasFromAny(val);
+    }
+
+    // Detect on all views (Face-API age/gender/expressions)
+    const dets = {};
+    for (const k of ['front', 'left', 'right']) dets[k] = await detectOne(faceapi, rawCanvas[k]);
+    
+    const any = ['front', 'left', 'right'].find(k => !!dets[k]);
+    if (!any) throw new Error('NO_FACE_DETECTED');
+    
+    const perView = {};
+    const ageViews = [];
+    const exprViews = [];
+    
+    for (const k of ['front', 'left', 'right']) {
+      const d = dets[k];
+      if (!d) continue;
+      
+      const pts = pointsFromLandmarks(d.landmarks);
+      console.log(`Landmarks for ${k}:`, pts.length);
+      console.log(`First 5 landmarks for ${k}:`, pts.slice(0, 5));
+      
+      const { canvas: aligned } = alignToCanonical(rawCanvas[k], pts, 400, 480);
+      normalizeIllumination(aligned);
+      const ctxA = aligned.getContext('2d');
+      const blurVar = varianceOfLaplacian(ctxA.getImageData(0, 0, aligned.width, aligned.height));
+      const pose = poseFromEyesNose(pts);
+      const nearFrontal = Math.abs(pose.roll) <= 8 && Math.abs(pose.yaw) <= 8;
+      
+      // Feature scores (68-landmarks-based)
+      const forehead = foreheadWrinkleScore(aligned, d.landmarks);
+      const glabella = glabellarScore(aligned, d.landmarks);
+      const crows = crowsFeetScore(aligned, d.landmarks);
+      const dark = darkCircleScore(aligned, d.landmarks);
+      const bag = eyebagPuffinessScore(aligned, d.landmarks);
+      const sag = saggingScore(d.landmarks);
+      const red = rednessScore(aligned, d.landmarks);
+      const tex = textureScore(aligned, d.landmarks);
+      const pig = pigmentationScore(aligned, d.landmarks);
+      const perioral = perioralFineLinesScore(aligned, d.landmarks);
+      const thin = thinLipsScore(d.landmarks);
+      const mar = marionetteScore(aligned, d.landmarks);
+      const chin = weakChinScore(d.landmarks);
+      const jawSoft = jawlineSoftnessScore(aligned, d.landmarks);
+      const dbl = doubleChinScore(aligned, d.landmarks);
+      const temple = templeHollownessScore(aligned, d.landmarks);
+      const dull = dullSkinScore(aligned, d.landmarks);
+      
+      // Face-API age/gender/expressions (no ONNX)
+      const faAge = Number.isFinite(d.age) ? d.age : NaN;
+      const ageEst = pickAge(NaN, faAge);
+      const gender = d.gender || 'unknown';
+      const expr = d.expressions || {};
+      
+      // symmetry per view if near-frontal
+      let sym = null;
+      if (nearFrontal) {
+        const ptsAligned = pointsFromLandmarks(d.landmarks);
+        sym = symmetryStats(aligned, ptsAligned);
+      }
+      
+      // ---- Optional FaceMesh (safe-guarded)
+      let mesh468 = null;
+      if (FACE_MESH_ENABLE && MESH_READY && typeof estimateMeshOnCanvas === 'function') {
+        try {
+          const meshRes = await estimateMeshOnCanvas(aligned);
+          if (meshRes && meshRes.points && meshRes.points.length >= 468) {
+            mesh468 = { count: meshRes.count, points: meshRes.points };
+          }
+        } catch (err) {
+          console.warn('[mesh] estimation failed:', err?.message || err);
+        }
+      }
+      
+      perView[k] = {
+        age: ageEst, expr, gender, blurVar, pose, nearFrontal, aligned,
+        forehead, glabella, crows, dark, bag, sag, red, tex, pig, perioral, thin, mar, chin, jawSoft, dbl, temple, dull,
+        symmetry: sym,
+        mesh468,
+      };
+      
+      if (isSaneAge(ageEst)) ageViews.push(ageEst);
+      exprViews.push(expr);
+    }
+    
+    // Aggregate across views
+    const meanOf = (key) => aggMean(Object.values(perView).map(v => v[key]));
+    
+    // Emotions aggregation via Face-API
+    let topEmotion = '-';
+    {
+      const keys = new Set();
+      exprViews.forEach(e => Object.keys(e || {}).forEach(k => keys.add(k)));
+      const avg = {};
+      keys.forEach(k => { avg[k] = aggMean(exprViews.map(e => (e?.[k] ?? 0))); });
+      topEmotion = Object.entries(avg).sort((a, b) => b[1] - a[1])[0]?.[0] || '-';
+    }
+    
+    // symmetry aggregate
+    const symMmArr = Object.values(perView).map(v => v.symmetry?.rmsMm).filter(Number.isFinite);
+    const symMm = aggMean(symMmArr);
+    const symStd = aggStd(symMmArr);
+    const symPctArr = Object.values(perView).map(v => v.symmetry?.pctIPD).filter(Number.isFinite);
+    const symPct = aggMean(symPctArr);
+    const symBucket = (() => {
+      if (!Number.isFinite(symPct)) return '—';
+      const p = symPct * 100;
+      return p < 2 ? 'Low' : p < 4 ? 'Moderate' : 'High';
+    })();
+    
+    // age smoothing + range (robust to missing)
+    const rawAges = ageViews.filter(isSaneAge);
+    let ageMean = rawAges.length ? Math.round(aggMean(rawAges)) : NaN;
+    let ageLow = Number.isFinite(ageMean) ? ageMean - 3 : null;
+    let ageHigh = Number.isFinite(ageMean) ? ageMean + 3 : null;
+    
+    const blurAvg = aggMean(Object.values(perView).map(v => v.blurVar));
+    if (Number.isFinite(ageMean) && blurAvg < 35) {
+      ageLow = ageMean - 4;
+      ageHigh = ageMean + 4;
+    }
+    
+    const findings = {
+      viewUsed: any,
+      ageEstimate: ageMean,
+      ageLow, ageHigh,
+      gender: (Object.values(perView).find(v => v.gender && v.gender !== 'unknown')?.gender) || 'unknown',
+      topEmotion,
+      symmetry: Number.isFinite(symPct) ? Math.max(0, Math.min(100, Math.round(100 - symPct * 100))) : 0,
+      symRmsMm: Number.isFinite(symMm) ? Number(symMm.toFixed(2)) : NaN,
+      symPctIPD: Number.isFinite(symPct) ? Number(symPct.toFixed(4)) : NaN,
+      symBucket,
+      symStdMm: Number.isFinite(symStd) ? Number(symStd.toFixed(2)) : NaN,
+      
+      foreheadWrinkleScore: round(meanOf('forehead')),
+      glabellarScore: round(meanOf('glabella')),
+      crowsFeetScore: round(meanOf('crows')),
+      darkCircleScore: round(meanOf('dark')),
+      eyebagScore: round(meanOf('bag')),
+      saggingScore: round(meanOf('sag')),
+      rednessScore: round(meanOf('red')),
+      textureScore: round(meanOf('tex')),
+      pigmentationScore: round(meanOf('pig')),
+      perioralFineLinesScore: round(meanOf('perioral')),
+      thinLipsScore: round(meanOf('thin')),
+      marionetteScore: round(meanOf('mar')),
+      weakChinScore: round(meanOf('chin')),
+      jawlineSoftnessScore: round(meanOf('jawSoft')),
+      doubleChinScore: round(meanOf('dbl')),
+      templeHollownessScore: round(meanOf('temple')),
+      dullSkinScore: round(meanOf('dull')),
+      nasolabialScore: round(meanOf('sag') * 0.5 + meanOf('tex') * 0.2 + meanOf('pig') * 0.1),
+      
+      // NEW: surface mesh availability flag (client can read rawViews for points)
+      mesh468Enabled: FACE_MESH_ENABLE && MESH_READY ? true : false,
+    };
+    
+    const suggestionIds = mapToTreatmentIds(findings);
+    
+    // Compact mesh into raw: only pass perView name + points
+    const rawViews = {};
+    for (const k of Object.keys(perView)) {
+      const v = perView[k];
+      rawViews[k] = {
+        pose: v.pose,
+        nearFrontal: v.nearFrontal,
+        mesh468: v.mesh468 ? { count: v.mesh468.count, points: v.mesh468.points } : null,
+      };
+    }
+    
+    return { findings: { ...findings, views: rawViews }, suggestionIds };
+  } catch (err) {
+    const msg = String(err?.message || err);
+    if (/MISSING_IMAGE_|BAD_IMAGE_INPUT|NO_FACE_DETECTED|ONLY_IMAGES_ALLOWED|MISSING_IN_MEMORY_IMAGE|ANALYSIS_TIMEOUT/.test(msg)) {
+      throw err;
+    }
+    console.warn('[analysis] falling back to safe demo analysis:', msg);
+    const fallback = buildFallbackFindings();
+    return {
+      findings: { ...fallback, views: {} },
+      suggestionIds: ['skinbooster'],
     };
   }
-  
-  return { findings: { ...findings, views: rawViews }, suggestionIds };
 }
 
 // ============================================================================
@@ -1686,12 +1762,34 @@ async function updateUserProfile(id, updates) {
   return users[idx];
 }
 
+function extractAuthToken(req) {
+  const header = req.headers.authorization || req.headers['x-auth-token'] || req.headers['x-token'] || req.headers.token || '';
+  let token = '';
+
+  if (typeof header === 'string') {
+    token = header.trim();
+    const m = token.match(/^Bearer\s+(.+)$/i);
+    if (m) token = m[1].trim();
+    else if (token.toLowerCase().startsWith('token ')) token = token.slice(6).trim();
+  } else if (Array.isArray(header)) {
+    token = String(header[0] || '').trim();
+    const m = token.match(/^Bearer\s+(.+)$/i);
+    if (m) token = m[1].trim();
+    else if (token.toLowerCase().startsWith('token ')) token = token.slice(6).trim();
+  }
+
+  if (!token) {
+    const queryToken = req.query?.token || req.body?.token || '';
+    token = String(queryToken || '').trim();
+  }
+
+  return token;
+}
+
 async function requireAuth(req, res, next) {
   try {
-    const auth = req.headers['authorization'] || '';
-    const m = auth.match(/^Bearer\s+(.+)$/i);
-    if (!m) return res.status(401).json({ error: 'UNAUTHORIZED' });
-    const token = m[1];
+    const token = extractAuthToken(req);
+    if (!token) return res.status(401).json({ error: 'UNAUTHORIZED' });
     const user = await findUserByToken(token);
     if (!user) return res.status(401).json({ error: 'UNAUTHORIZED' });
     req.user = user;
@@ -1937,10 +2035,11 @@ app.post(
         putMem(key, normalized, mime);
       }
 
-      const files = need.map((field) => ({ field, path: `mem:${uploadId}:${field}` }));
+      const fileMap = Object.fromEntries(need.map((field) => [field, `mem:${uploadId}:${field}`]));
+      const files = need.map((field) => ({ field, path: fileMap[field] }));
 
       console.log('[uploads] ok (in-memory)', files.map(f => `${f.field}=${f.path}`).join(' '), '| user', req.user.id);
-      res.json({ uploadId, files });
+      res.json({ uploadId, files, fileMap });
     } catch (err) {
       console.error('[uploads] failed:', err?.stack || err);
       res.status(500).json({ error: 'UPLOAD_FAILED' });
@@ -1989,11 +2088,34 @@ app.post(
 
     console.log(`[analysis:${reqId}] start`);
 
-    // Parse "files" (stringified JSON or object)
+    // Parse "files" (stringified JSON or object), plus support uploadId from the client
     let files = req.body?.files;
     if (typeof files === 'string') {
       try { files = JSON.parse(files); } catch {}
     }
+    if (!files || typeof files !== 'object' || Array.isArray(files)) {
+      files = {};
+    }
+
+    const uploadId = req.body?.uploadId || req.body?.upload_id || req.body?.id;
+    if (typeof uploadId === 'string' && uploadId.trim()) {
+      for (const field of ['front', 'left', 'right']) {
+        if (!files[field]) files[field] = `mem:${uploadId.trim()}:${field}`;
+      }
+    }
+
+    for (const field of ['front', 'left', 'right']) {
+      const candidate = req.body?.[field];
+      if (candidate && !files[field]) files[field] = candidate;
+    }
+
+    if (req.body?.fileMap && typeof req.body.fileMap === 'object') {
+      for (const field of ['front', 'left', 'right']) {
+        const candidate = req.body.fileMap[field];
+        if (candidate && !files[field]) files[field] = candidate;
+      }
+    }
+
     if (!files?.front || !files?.left || !files?.right) {
       console.warn(`[analysis:${reqId}] missing images`, files);
       return res.status(400).json({ error: 'MISSING_IMAGES' });
