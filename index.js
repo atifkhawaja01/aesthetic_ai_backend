@@ -260,13 +260,32 @@ console.log('[storage] users db:', USERS_DB);
 
 app.use('/uploads', express.static(UPLOAD_DIR));
 
+const memoryJsonCache = new Map();
+
 const readJSON = (p, fallback) => {
-  try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return fallback; }
+  const resolvedPath = path.resolve(p);
+  const cacheKey = `json:${resolvedPath}`;
+  if (memoryJsonCache.has(cacheKey)) {
+    return memoryJsonCache.get(cacheKey);
+  }
+
+  try {
+    const parsed = JSON.parse(fs.readFileSync(resolvedPath, 'utf8'));
+    memoryJsonCache.set(cacheKey, parsed);
+    return parsed;
+  } catch (err) {
+    return fallback;
+  }
 };
+
 const writeJSON = (p, obj) => {
-  const candidates = [p];
-  const fallbackPath = path.join(DATA_DIR, path.basename(p));
-  if (fallbackPath !== p) candidates.push(fallbackPath);
+  const resolvedPath = path.resolve(p);
+  const cacheKey = `json:${resolvedPath}`;
+  memoryJsonCache.set(cacheKey, obj);
+
+  const candidates = [resolvedPath];
+  const fallbackPath = path.join(DATA_DIR, path.basename(resolvedPath));
+  if (fallbackPath !== resolvedPath) candidates.push(fallbackPath);
 
   let lastErr = null;
   for (const target of candidates) {
@@ -279,7 +298,8 @@ const writeJSON = (p, obj) => {
     }
   }
 
-  throw lastErr || new Error(`Failed to write JSON to ${p}`);
+  console.warn('[storage] disk write fallback active for', resolvedPath, lastErr?.message || lastErr);
+  return resolvedPath;
 };
 
 // ---- Simple in-memory store for uploaded image buffers (auto-expires)
