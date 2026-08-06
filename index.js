@@ -168,16 +168,36 @@ const PORT = process.env.PORT || 4000;
 const ROOT = __dirname;
 const MODELS_DIR = path.join(ROOT, 'models');
 const UPLOAD_DIR = path.join(ROOT, 'uploads');
-const DATA_DIR = process.env.DATA_DIR
+const TMP_DATA_DIR = path.join(os.tmpdir(), 'aesthetic_ai_backend', 'data');
+const ROOT_DATA_DIR = path.join(ROOT, 'data');
+const DEFAULT_DATA_DIR = process.env.DATA_DIR
   ? path.resolve(process.env.DATA_DIR)
-  : path.join(ROOT, 'data');
+  : ROOT_DATA_DIR;
+
+function resolveWritableDataDir(preferredDir) {
+  const candidates = [];
+  if (preferredDir) candidates.push(path.resolve(preferredDir));
+  candidates.push(ROOT_DATA_DIR);
+  candidates.push(TMP_DATA_DIR);
+
+  for (const dir of candidates) {
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      const probe = path.join(dir, '.write-test');
+      fs.writeFileSync(probe, 'ok');
+      fs.unlinkSync(probe);
+      return dir;
+    } catch {}
+  }
+  return TMP_DATA_DIR;
+}
+
+const DATA_DIR = resolveWritableDataDir(DEFAULT_DATA_DIR);
 const ANALYSES_DB = path.join(DATA_DIR, 'analyses.json');
 const TREATMENTS_DB = path.join(DATA_DIR, 'treatments.json');
-const ROOT_USERS_DB = path.join(ROOT, 'users.json');
-const DATA_USERS_DB = path.join(DATA_DIR, 'users.json');
 const USERS_DB = process.env.USERS_DB_PATH
   ? path.resolve(process.env.USERS_DB_PATH)
-  : (fs.existsSync(ROOT_USERS_DB) ? ROOT_USERS_DB : DATA_USERS_DB);
+  : path.join(DATA_DIR, 'users.json');
 const USERS_DIR = path.dirname(USERS_DB);
 const DEBUG_AUTH = String(process.env.DEBUG_AUTH || '').toLowerCase() === 'true';
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
@@ -194,23 +214,41 @@ const FACE_MESH_ENABLE = String(process.env.FACE_MESH_ENABLE ?? 'true').toLowerC
 for (const d of [UPLOAD_DIR, DATA_DIR, MODELS_DIR, USERS_DIR]) {
   if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true });
 }
-if (!fs.existsSync(ANALYSES_DB)) fs.writeFileSync(ANALYSES_DB, '[]');
-if (!fs.existsSync(USERS_DB)) {
-  if (fs.existsSync(ROOT_USERS_DB) && ROOT_USERS_DB !== USERS_DB) {
-    fs.copyFileSync(ROOT_USERS_DB, USERS_DB);
-  } else if (fs.existsSync(DATA_USERS_DB) && DATA_USERS_DB !== USERS_DB) {
-    fs.copyFileSync(DATA_USERS_DB, USERS_DB);
-  } else {
-    fs.writeFileSync(USERS_DB, '[]');
+
+const ROOT_USERS_DB = path.join(ROOT, 'users.json');
+const ROOT_TREATMENTS_DB = path.join(ROOT, 'seed', 'treatments.seed.json');
+const ROOT_ANALYSES_DB = path.join(ROOT, 'data', 'analyses.json');
+
+function seedStorageFile(targetPath, seedPath, fallback) {
+  try {
+    if (!fs.existsSync(targetPath)) {
+      if (seedPath && fs.existsSync(seedPath)) {
+        fs.copyFileSync(seedPath, targetPath);
+      } else {
+        fs.writeFileSync(targetPath, fallback);
+      }
+    }
+  } catch (err) {
+    console.warn('[storage] seed failed for', targetPath, err?.message || err);
   }
 }
+
+seedStorageFile(ANALYSES_DB, ROOT_ANALYSES_DB, '[]');
+seedStorageFile(TREATMENTS_DB, ROOT_TREATMENTS_DB, '[]');
+seedStorageFile(USERS_DB, ROOT_USERS_DB, '[]');
+
+console.log('[storage] data dir:', DATA_DIR);
+console.log('[storage] users db:', USERS_DB);
 
 app.use('/uploads', express.static(UPLOAD_DIR));
 
 const readJSON = (p, fallback) => {
   try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return fallback; }
 };
-const writeJSON = (p, obj) => fs.writeFileSync(p, JSON.stringify(obj, null, 2));
+const writeJSON = (p, obj) => {
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, JSON.stringify(obj, null, 2));
+};
 
 // ---- Simple in-memory store for uploaded image buffers (auto-expires)
 const MEM_TTL_MS = 10 * 60 * 1000; // 10 minutes
